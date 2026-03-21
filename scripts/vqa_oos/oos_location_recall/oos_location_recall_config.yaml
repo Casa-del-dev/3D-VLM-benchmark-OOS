@@ -1,0 +1,24 @@
+annotations_root: ../../../../hd-epic-annotations
+data_root: ../../../../data
+intermediate_data_root: ../../../../hd-epic-annotations/Intermediate_data
+
+inputs:
+  participants: [P01, P02]
+  videos: []
+
+sampling_fps: 2.0
+out_of_sight_horizon_sec: 2.0
+max_questions_per_video: 20
+
+question_classes:
+  absolute: true
+  relative: true
+
+relative:
+  border_tolerance_deg: 10.0
+
+absolute:
+  num_choices: 5
+
+output_json: ../../../outputs/oos_location_recall_questions.json
+random_seed: 42

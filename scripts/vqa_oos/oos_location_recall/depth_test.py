@@ -1,0 +1,2 @@
+# Depth test to determine if object in camera angle is not occluded. (See if calculated depth from camera and object locations is same as estimated depth)
+# Does this make sense? Do we have the data for this?
