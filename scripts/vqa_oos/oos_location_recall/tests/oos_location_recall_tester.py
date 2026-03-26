@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 from io import BytesIO
 import importlib
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from typing import Any
@@ -20,11 +22,26 @@ from in_view_determination import determine_in_view_objects, load_frame_context,
 from in_view_track_generator import generate_in_view_tracks  # noqa: E402
 from question_generator import GenerationConfig, _load_config, generate_questions_from_config  # noqa: E402
 
+"""
+EREN SETUP:
+DEFAULT_CONFIG = MODULE_DIR / "oos_location_recall_config.yaml"
+DEFAULT_DATA_ROOT_REL = "../../../../../"
+DEFAULT_VIDEO_REL_TEMPLATE = "HD-EPIC/Videos/{participant}/{video_id}.mp4"
+DEFAULT_OUTPUT_DIR_REL = "../../../outputs/oos_location_recall_debug"
+"""
 
+"""
+IVO SETUP:
 DEFAULT_CONFIG = MODULE_DIR / "oos_location_recall_config.yaml"
 DEFAULT_DATA_ROOT_REL = "../../../../../data"
 DEFAULT_VIDEO_REL_TEMPLATE = "HD-EPIC/Videos/{participant}/{video_id}.mp4"
-DEFAULT_OUTPUT_DIR_REL = "../../../../outputs/oos_location_recall_debug"
+DEFAULT_OUTPUT_DIR_REL = "../../../outputs/oos_location_recall_debug"
+"""
+
+DEFAULT_CONFIG = MODULE_DIR / "oos_location_recall_config.yaml"
+DEFAULT_DATA_ROOT_REL = "../../../../../"
+DEFAULT_VIDEO_REL_TEMPLATE = "HD-EPIC/Videos/{participant}/{video_id}.mp4"
+DEFAULT_OUTPUT_DIR_REL = "../../../outputs/oos_location_recall_debug"
 
 
 def _select_evenly(values: list[float], n: int) -> list[float]:
@@ -344,7 +361,7 @@ def _render_question_frame(
 
 def _ensure_ffmpeg() -> None:
 	"""Ensure ffmpeg exists in PATH before visualization work."""
-	if subprocess.run(["bash", "-lc", "command -v ffmpeg"], check=False, stdout=subprocess.DEVNULL).returncode != 0:
+	if shutil.which("ffmpeg") is None and shutil.which("ffmpeg.exe") is None:
 		raise RuntimeError("ffmpeg is required but was not found in PATH.")
 
 

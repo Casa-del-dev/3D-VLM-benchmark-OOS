@@ -1,20 +1,41 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
+import sys
 import argparse
 from io import BytesIO
 import subprocess
+import shutil
 
 from PIL import Image, ImageDraw, ImageOps
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from in_view_determination import determine_in_view_objects, load_frame_context
 from in_view_track_generator import generate_in_view_tracks
 
+"""
+EREN SETUP:
+DEFAULT_VIDEO_ID = "P01-20240203-184045"
+DEFAULT_VIDEO_REL_PATH = "HD-EPIC/Videos/P01/P01-20240203-184045.mp4"
+DEFAULT_DATA_ROOT_REL = "../../../../.."
+DEFAULT_ANN_ROOT_REL = "../../../../../hd-epic-annotations"
+DEFAULT_INTERMEDIATE_ROOT = "Intermediate_data"
+"""
 
+"""
+IVO SETUP:
 DEFAULT_VIDEO_ID = "P01-20240203-184045"
 DEFAULT_VIDEO_REL_PATH = "HD-EPIC/Videos/P01/P01-20240203-184045.mp4"
 DEFAULT_DATA_ROOT_REL = "../../../../data"
 DEFAULT_ANN_ROOT_REL = "../../../../hd-epic-annotations"
+DEFAULT_INTERMEDIATE_ROOT = "Intermediate_data"
+"""
+
+DEFAULT_VIDEO_ID = "P01-20240203-184045"
+DEFAULT_VIDEO_REL_PATH = "HD-EPIC/Videos/P01/P01-20240203-184045.mp4"
+DEFAULT_DATA_ROOT_REL = "../../../../.."
+DEFAULT_ANN_ROOT_REL = "../../../../../hd-epic-annotations"
 DEFAULT_INTERMEDIATE_ROOT = "Intermediate_data"
 
 
@@ -183,7 +204,7 @@ def main() -> None:
         raise FileNotFoundError(f"Video file not found: {video_path}")
     if not args.annotations_root.exists():
         raise FileNotFoundError(f"Annotations root not found: {args.annotations_root}")
-    if subprocess.run(["bash", "-lc", "command -v ffmpeg"], check=False, stdout=subprocess.DEVNULL).returncode != 0:
+    if shutil.which("ffmpeg") is None and shutil.which("ffmpeg.exe") is None:
         raise RuntimeError("ffmpeg is required but was not found in PATH.")
 
     tracks = generate_in_view_tracks(
