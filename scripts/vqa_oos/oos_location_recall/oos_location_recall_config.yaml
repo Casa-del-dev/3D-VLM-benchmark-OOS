@@ -7,8 +7,8 @@ data_root: ../../../../HD-EPIC
 intermediate_data_root: ../../../../hd-epic-annotations/Intermediate_data
 
 inputs:
-  participants: [P01, P02]
-  videos: []
+  participants: [P01]
+  videos: [P01-20240202-161354]
 
 sampling_fps: 2.0
 out_of_sight_horizon_sec: 2.0
@@ -24,5 +24,5 @@ relative:
 absolute:
   num_choices: 5
 
-output_json: ../../../outputs/oos_location_recall_questions.json
+output_json: ../../outputs/oos_location_recall_questions.json
 random_seed: 42
