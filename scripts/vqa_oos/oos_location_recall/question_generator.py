@@ -10,7 +10,7 @@ from typing import Any
 
 from abs_answer_determ import build_fixture_vocabulary, determine_absolute_answer
 from anchored_coords import pick_central_anchor
-from in_view_determination import determine_in_view_objects, load_json
+from in_view_determination import DEFAULT_INTERMEDIATE_ROOT, determine_in_view_objects, load_json, load_jsonl
 from key_frame_generator import KeyFrameCandidate, generate_key_frames_for_videos
 from relative_answer_determ import determine_relative_answer_for_pair
 
@@ -29,6 +29,8 @@ class GenerationConfig:
 	videos: list[str]
 	participants: list[str]
 	output_json: Path
+	fixed_clip_start_earlier_sec: float
+	force_clip_start_to_video_start: bool
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -63,6 +65,26 @@ def _time_token(time_sec: float, input_key: str = "video 1") -> str:
 	return f"<TIME {_format_time_hms_1dp(time_sec)} {input_key}>"
 
 
+
+
+def _infer_video_time_window_sec(
+	video_id: str,
+	annotations_root: Path,
+	fps_for_frame_lookup: float = 30.0,
+	intermediate_root: str = DEFAULT_INTERMEDIATE_ROOT,
+) -> tuple[float, float]:
+	"""Infer the valid video time window from framewise metadata."""
+	participant_id = video_id.split("-")[0]
+	framewise_path = annotations_root / intermediate_root / participant_id / video_id / "framewise_info.jsonl"
+	rows = load_jsonl(framewise_path)
+	frame_indices = [int(r["frame_index"]) for r in rows if r.get("frame_index") is not None]
+	if not frame_indices:
+		raise ValueError(f"No valid frame_index entries found for video {video_id}")
+	min_frame = min(frame_indices)
+	max_frame = max(frame_indices)
+	return min_frame / fps_for_frame_lookup, max_frame / fps_for_frame_lookup
+
+
 def _load_config(config_path: Path) -> GenerationConfig:
 	"""Parse YAML and materialize a typed generation configuration."""
 	root = config_path.parent
@@ -86,6 +108,8 @@ def _load_config(config_path: Path) -> GenerationConfig:
 		videos=[str(v) for v in inputs.get("videos", [])],
 		participants=[str(p) for p in inputs.get("participants", [])],
 		output_json=(root / raw.get("output_json", "oos_location_recall_questions.json")).resolve(),
+		fixed_clip_start_earlier_sec=float(raw.get("fixed_clip_start_earlier_sec", 0.0)),
+		force_clip_start_to_video_start=bool(raw.get("force_clip_start_to_video_start", False)),
 	)
 
 
@@ -148,17 +172,32 @@ def generate_questions_from_config(cfg: GenerationConfig) -> dict[str, dict[str,
 
 	for video_id in video_ids:
 		candidates = sorted(keyframes_by_video.get(video_id, []), key=lambda c: c.query_time_sec)
+		video_start_sec, _ = _infer_video_time_window_sec(video_id=video_id, annotations_root=cfg.annotations_root)
 		for cand in candidates:
 			if cand.oos_duration_sec + 1e-9 < horizon:
 				continue
 			if not _is_object_out_of_view(cand, cfg.annotations_root):
 				continue
 
+			if cfg.force_clip_start_to_video_start:
+				shifted_clip_start_time_sec = video_start_sec
+			else:
+				shifted_clip_start_time_sec = cand.clip_start_time_sec - cfg.fixed_clip_start_earlier_sec
+				if shifted_clip_start_time_sec < video_start_sec - 1e-9:
+					continue
+			
+			query_time_in_clip_sec = cand.query_time_sec - shifted_clip_start_time_sec
+			clip_duration_sec = cand.clip_end_time_sec - shifted_clip_start_time_sec
+
 			base_fields = {
 				"inputs": {"video 1": {"id": cand.video_id}},
 				"video_id": cand.video_id,
 				"query_time_sec": cand.query_time_sec,
+				"query_time_in_clip_sec": query_time_in_clip_sec,
 				"horizon_sec": horizon,
+				"clip_start_time_sec": shifted_clip_start_time_sec,
+				"clip_end_time_sec": cand.clip_end_time_sec,
+				"clip_duration_sec": clip_duration_sec,
 				"object_a_assoc_id": cand.assoc_id,
 				"object_a_name": cand.object_name,
 				"generation_info": {
@@ -168,6 +207,8 @@ def generate_questions_from_config(cfg: GenerationConfig) -> dict[str, dict[str,
 					"sampling_fps": cfg.sampling_fps,
 					"random_seed": cfg.random_seed,
 					"relocation_score": cand.relocation_score,
+					"fixed_clip_start_earlier_sec": cfg.fixed_clip_start_earlier_sec,
+					"original_clip_start_time_sec": cand.clip_start_time_sec,
 				},
 			}
 
@@ -182,7 +223,7 @@ def generate_questions_from_config(cfg: GenerationConfig) -> dict[str, dict[str,
 						fixture_vocabulary=fixture_vocab,
 						rng=rng,
 					)
-					time_tok = _time_token(cand.query_time_sec, input_key="video 1")
+					time_tok = _time_token(query_time_in_clip_sec, input_key="video 1")
 					qid = f"oos_abs_fixture_location_{horizon_token}_{abs_idx}"
 					results[qid] = {
 						**base_fields,
@@ -221,7 +262,7 @@ def generate_questions_from_config(cfg: GenerationConfig) -> dict[str, dict[str,
 					)
 					if rel_answer.correct_idx not in rel_answer.acceptable_idxs:
 						continue
-					time_tok = _time_token(cand.query_time_sec, input_key="video 1")
+					time_tok = _time_token(query_time_in_clip_sec, input_key="video 1")
 					qid = f"oos_rel_anchor_location_{horizon_token}_{rel_idx}"
 					results[qid] = {
 						**base_fields,
@@ -241,7 +282,6 @@ def generate_questions_from_config(cfg: GenerationConfig) -> dict[str, dict[str,
 					pass
 
 	return results
-
 
 def save_questions_json(questions: dict[str, dict[str, Any]], output_path: Path) -> None:
 	"""Write generated questions to a UTF-8 JSON file."""
@@ -265,28 +305,54 @@ def parse_args() -> argparse.Namespace:
 		default=None,
 		help="Optional output JSON path override",
 	)
+	parser.add_argument(
+		"--videoStart",
+		action="store_true",
+		help="Override YAML: force clip to start at video beginning",
+	)
+	parser.add_argument(
+		"--clipOffset",
+		type=float,
+		default=None,
+		help="Override YAML: set fixed_clip_start_earlier_sec",
+	)
 	return parser.parse_args()
 
 
 def main() -> None:
 	"""CLI entrypoint: load config, generate questions, and persist JSON."""
 	args = parse_args()
-	cfg = _load_config(args.config.resolve())
+	base_cfg = _load_config(args.config.resolve())
+
+	force_video_start = base_cfg.force_clip_start_to_video_start
+	clip_offset = base_cfg.fixed_clip_start_earlier_sec
+
+	if args.videoStart:
+		force_video_start = True
+
+	if args.clipOffset is not None:
+		clip_offset = args.clipOffset
+
+	output_json = base_cfg.output_json
 	if args.output_json is not None:
-		cfg = GenerationConfig(
-			annotations_root=cfg.annotations_root,
-			sampling_fps=cfg.sampling_fps,
-			out_of_sight_horizon_sec=cfg.out_of_sight_horizon_sec,
-			max_questions_per_video=cfg.max_questions_per_video,
-			absolute_enabled=cfg.absolute_enabled,
-			relative_enabled=cfg.relative_enabled,
-			relative_border_tolerance_deg=cfg.relative_border_tolerance_deg,
-			absolute_num_choices=cfg.absolute_num_choices,
-			random_seed=cfg.random_seed,
-			videos=cfg.videos,
-			participants=cfg.participants,
-			output_json=args.output_json.resolve(),
-		)
+		output_json = args.output_json.resolve()
+
+	cfg = GenerationConfig(
+		annotations_root=base_cfg.annotations_root,
+		sampling_fps=base_cfg.sampling_fps,
+		out_of_sight_horizon_sec=base_cfg.out_of_sight_horizon_sec,
+		max_questions_per_video=base_cfg.max_questions_per_video,
+		absolute_enabled=base_cfg.absolute_enabled,
+		relative_enabled=base_cfg.relative_enabled,
+		relative_border_tolerance_deg=base_cfg.relative_border_tolerance_deg,
+		absolute_num_choices=base_cfg.absolute_num_choices,
+		random_seed=base_cfg.random_seed,
+		videos=base_cfg.videos,
+		participants=base_cfg.participants,
+		output_json=output_json,
+		fixed_clip_start_earlier_sec=clip_offset,
+		force_clip_start_to_video_start=force_video_start,
+	)
 
 	questions = generate_questions_from_config(cfg)
 	save_questions_json(questions, cfg.output_json)

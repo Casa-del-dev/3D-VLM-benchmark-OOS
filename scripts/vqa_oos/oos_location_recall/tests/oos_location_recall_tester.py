@@ -78,32 +78,73 @@ def _load_pillow_modules() -> tuple[Any, Any, Any]:
 		) from exc
 	return image_module, draw_module, ops_module
 
+def _read_frame_at_index(video_path: Path, frame_index: int) -> Any:
+	"""Read one frame by exact frame index using OpenCV."""
+	image_module, _, _ = _load_pillow_modules()
+	try:
+		import cv2
+	except ModuleNotFoundError as exc:
+		raise ModuleNotFoundError(
+			"OpenCV is required for frame-index based reading. Install it with: pip install opencv-python"
+		) from exc
+
+	cap = cv2.VideoCapture(str(video_path))
+	if not cap.isOpened():
+		raise RuntimeError(f"Failed to open video: {video_path}")
+
+	cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
+	ok, frame_bgr = cap.read()
+	cap.release()
+
+	if not ok or frame_bgr is None:
+		raise RuntimeError(f"Failed to read frame index {frame_index} from {video_path}")
+
+	frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+	return image_module.fromarray(frame_rgb)
+
 
 def _read_frame_at_time(video_path: Path, t_sec: float) -> Any:
 	"""Decode a single RGB frame at the requested timestamp using ffmpeg."""
 	image_module, _, _ = _load_pillow_modules()
-	cmd = [
-		"ffmpeg",
-		"-hide_banner",
-		"-loglevel",
-		"error",
-		"-ss",
-		f"{t_sec:.3f}",
-		"-i",
-		str(video_path),
-		"-frames:v",
-		"1",
-		"-f",
-		"image2pipe",
-		"-vcodec",
-		"png",
-		"pipe:1",
-	]
-	proc = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-	if proc.returncode != 0 or not proc.stdout:
-		raise RuntimeError(f"Failed to read frame at t={t_sec:.3f}s: {proc.stderr.decode('utf-8', errors='ignore')}")
-	return image_module.open(BytesIO(proc.stdout)).convert("RGB")
 
+	def _try_read(ts: float) -> Any | None:
+		cmd = [
+			"ffmpeg",
+			"-hide_banner",
+			"-loglevel",
+			"error",
+			"-ss",
+			f"{ts:.3f}",
+			"-i",
+			str(video_path),
+			"-frames:v",
+			"1",
+			"-f",
+			"image2pipe",
+			"-vcodec",
+			"png",
+			"pipe:1",
+		]
+		proc = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+		if proc.returncode == 0 and proc.stdout:
+			return image_module.open(BytesIO(proc.stdout)).convert("RGB")
+		return None
+
+	# exact time
+	frame = _try_read(t_sec)
+	if frame is not None:
+		return frame
+
+	# small fallbacks around the sampled timestamp
+	for delta in (0.05, 0.1, 0.2):
+		frame = _try_read(max(0.0, t_sec - delta))
+		if frame is not None:
+			return frame
+		frame = _try_read(t_sec + delta)
+		if frame is not None:
+			return frame
+
+	raise RuntimeError(f"Failed to read frame at t={t_sec:.3f}s from {video_path}")
 
 def _get_object_state(video_id: str, t_sec: float, assoc_id: str, annotations_root: Path) -> Any | None:
 	"""Return one object's state at time t, or None when absent."""
@@ -233,7 +274,13 @@ def _render_object_grid(
 	cells: list[Any] = []
 
 	for t_sec in times_sec:
-		frame = _read_frame_at_time(video_path, t_sec)
+		ctx_at_t = load_frame_context(
+			video_id=video_id,
+			time_sec=t_sec,
+			annotations_root=annotations_root,
+			fps=30.0,
+		)
+		frame = _read_frame_at_index(video_path, ctx_at_t.frame_index)
 		state = _get_object_state(video_id, t_sec, assoc_id, annotations_root)
 		in_view = bool(state is not None and state.status == "ok" and state.in_view)
 		color = (0, 180, 0) if in_view else (200, 0, 0)
@@ -309,7 +356,13 @@ def _render_question_frame(
 ) -> Any:
 	"""Render one annotated frame panel for a generated question instance."""
 	image_module, draw_module, _ = _load_pillow_modules()
-	frame = _read_frame_at_time(video_path, time_sec)
+	ctx_at_t = load_frame_context(
+		video_id=video_id,
+		time_sec=time_sec,
+		annotations_root=annotations_root,
+		fps=30.0,
+	)
+	frame = _read_frame_at_index(video_path, ctx_at_t.frame_index)
 	draw = draw_module.Draw(frame)
 
 	state = _get_object_state(video_id, time_sec, assoc_id, annotations_root)
@@ -374,6 +427,8 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--video_path", type=Path, default=None, help="Optional direct mp4 path override")
 	parser.add_argument("--output_dir", type=Path, default=(SCRIPT_DIR / DEFAULT_OUTPUT_DIR_REL).resolve(), help="Folder for debug outputs")
 	parser.add_argument("--samples_per_class", type=int, default=10, help="How many in-view and out-of-view frames per object")
+	parser.add_argument("--videoStart", action="store_true", help="Override YAML: force clip to start at video beginning")
+	parser.add_argument("--clipOffset", type=float, default=None, help="Override YAML: set fixed_clip_start_earlier_sec")
 	return parser.parse_args()
 
 
@@ -389,6 +444,16 @@ def main() -> None:
 		raise FileNotFoundError(f"Video file not found: {video_path}")
 
 	base_cfg = _load_config(args.config.resolve())
+
+	force_video_start = base_cfg.force_clip_start_to_video_start
+	clip_offset = base_cfg.fixed_clip_start_earlier_sec
+
+	if args.videoStart:
+		force_video_start = True
+
+	if args.clipOffset is not None:
+		clip_offset = args.clipOffset
+
 	cfg = GenerationConfig(
 		annotations_root=base_cfg.annotations_root,
 		sampling_fps=base_cfg.sampling_fps,
@@ -402,6 +467,8 @@ def main() -> None:
 		videos=[video_id],
 		participants=[],
 		output_json=(args.output_dir / f"{video_id}_questions.json").resolve(),
+		fixed_clip_start_earlier_sec=clip_offset,
+		force_clip_start_to_video_start=force_video_start,
 	)
 
 	questions = generate_questions_from_config(cfg)

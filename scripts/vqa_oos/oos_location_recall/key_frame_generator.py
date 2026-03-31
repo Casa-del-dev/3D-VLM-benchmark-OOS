@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import math
+import random
 from typing import Any
 
 from in_view_determination import (
@@ -31,12 +32,7 @@ class RelocationScore:
 
 @dataclass(frozen=True)
 class KeyFrameCandidate:
-	"""One selected OOS key frame candidate (video, t, A).
-
-	Inputs: object visibility span, relocation ranking, and query-time mask lookup.
-	Computes: query timestamp and metadata needed by absolute/relative generators.
-	Outputs: immutable candidate record with OOS timing guarantees.
-	"""
+	"""One selected OOS key frame candidate (video, t, A)."""
 	video_id: str
 	assoc_id: str
 	object_name: str
@@ -47,6 +43,9 @@ class KeyFrameCandidate:
 	horizon_sec: float
 	fixture_at_query: str | None
 	relocation_score: int
+	clip_start_time_sec: float
+	clip_end_time_sec: float
+	clip_duration_sec: float
 
 
 def _collect_masks_for_track(mask_info_video: dict[str, Any], track: dict[str, Any]) -> list[dict[str, Any]]:
@@ -256,6 +255,189 @@ def _order_candidates_by_location_diversity(candidates: list[KeyFrameCandidate])
 	return first_pass + second_pass
 
 
+def _has_prior_visible_context(track: ObjectVisibilityTrack, query_time_sec: float) -> bool:
+	"""Return True if the object was visible at least once before the query time."""
+	for t, v in zip(track.sampled_times_sec, track.visibility_samples):
+		if t >= query_time_sec:
+			break
+		if v:
+			return True
+	return False
+
+
+def _get_object_tracks(
+	video_id: str,
+	assoc_id: str,
+	annotations_root: str | Path,
+) -> list[dict[str, Any]]:
+	"""Load and return sorted movement tracks for one object."""
+	annotations_root = Path(annotations_root)
+	assoc_info = load_json(annotations_root / "scene-and-object-movements" / "assoc_info.json")
+	video_objects: dict[str, Any] = assoc_info.get(video_id, {})
+	obj = video_objects.get(assoc_id)
+	if obj is None:
+		return []
+	return sorted(obj.get("tracks", []), key=lambda tr: float(tr["time_segment"][0]))
+
+
+def _eligible_prior_tracks(
+	video_id: str,
+	assoc_id: str,
+	query_time_sec: float,
+	annotations_root: str | Path,
+) -> list[dict[str, Any]]:
+	"""Return tracks fully completed before the queried time."""
+	tracks = _get_object_tracks(video_id=video_id, assoc_id=assoc_id, annotations_root=annotations_root)
+	return [tr for tr in tracks if float(tr["time_segment"][1]) <= query_time_sec + 1e-9]
+
+
+def _sample_clip_start_from_prior_track(
+	video_id: str,
+	assoc_id: str,
+	query_time_sec: float,
+	annotations_root: str | Path,
+	rng,
+) -> float | None:
+	"""Sample clip start from any completed prior track.
+
+	The returned time is drawn uniformly from one of the object's prior tracks, so the
+	clip can begin at any earlier movement episode rather than only after the last one.
+	"""
+	prior_tracks = _eligible_prior_tracks(
+		video_id=video_id,
+		assoc_id=assoc_id,
+		query_time_sec=query_time_sec,
+		annotations_root=annotations_root,
+	)
+	if not prior_tracks:
+		return None
+
+	chosen_track = rng.choice(prior_tracks)
+	track_start_sec = float(chosen_track["time_segment"][0])
+	track_end_sec = min(float(chosen_track["time_segment"][1]), query_time_sec)
+	if track_end_sec < track_start_sec - 1e-9:
+		return None
+	if track_end_sec <= track_start_sec + 1e-9:
+		return track_start_sec
+	return rng.uniform(track_start_sec, track_end_sec)
+
+
+def _stable_start_after_last_past_track(
+	video_id: str,
+	assoc_id: str,
+	span_start_sec: float,
+	annotations_root: str | Path,
+	fps_for_frame_lookup: float = 30.0,
+) -> float | None:
+	"""Return earliest stable time after the last completed movement before an OOS span.
+
+	This uses the object's last past movement track relative to span_start_sec and returns
+	the later of the track end time and the latest referenced mask timestamp. When no such
+	past track exists, None is returned so first-track/no-context cases can be skipped.
+	"""
+	annotations_root = Path(annotations_root)
+	assoc_info = load_json(annotations_root / "scene-and-object-movements" / "assoc_info.json")
+	mask_info = load_json(annotations_root / "scene-and-object-movements" / "mask_info.json")
+
+	video_objects: dict[str, Any] = assoc_info.get(video_id, {})
+	obj = video_objects.get(assoc_id)
+	if obj is None:
+		return None
+
+	last_past_track: dict[str, Any] | None = None
+	for tr in sorted(obj.get("tracks", []), key=lambda tr: float(tr["time_segment"][0])):
+		track_end_sec = float(tr["time_segment"][1])
+		if track_end_sec <= span_start_sec + 1e-9:
+			last_past_track = tr
+		else:
+			break
+
+	if last_past_track is None:
+		return None
+
+	track_end_sec = float(last_past_track["time_segment"][1])
+	mask_info_video: dict[str, Any] = mask_info.get(video_id, {})
+	track_masks = _collect_masks_for_track(mask_info_video, last_past_track)
+	if not track_masks:
+		return track_end_sec
+
+	latest_frame_number = max(int(m["frame_number"]) for m in track_masks)
+	latest_mask_time_sec = latest_frame_number / float(fps_for_frame_lookup)
+	return max(track_end_sec, latest_mask_time_sec)
+
+
+def _movement_overlaps_interval(
+	video_id: str,
+	assoc_id: str,
+	clip_start_time_sec: float,
+	clip_end_time_sec: float,
+	annotations_root: str | Path,
+) -> bool:
+	"""Return True if any movement track overlaps the requested interval."""
+	annotations_root = Path(annotations_root)
+	assoc_info = load_json(annotations_root / "scene-and-object-movements" / "assoc_info.json")
+	video_objects = assoc_info.get(video_id, {})
+	obj = video_objects.get(assoc_id)
+	if obj is None:
+		return True
+
+	for tr in obj.get("tracks", []):
+		start_t, end_t = tr["time_segment"]
+		if not (end_t < clip_start_time_sec or start_t > clip_end_time_sec):
+			return True
+	return False
+
+
+def _sample_clip_window(
+	span: VisibilitySpan,
+	video_id: str,
+	assoc_id: str,
+	annotations_root: str | Path,
+	rng,
+	max_tries: int = 50,
+) -> tuple[float, float, float, float] | None:
+	"""Sample (query time, clip start, clip end, clip duration) with a prior-track start.
+
+	Rules enforced:
+	- query time and clip end must stay inside the same out-of-sight span;
+	- clip start must lie inside one completed track before the query time;
+	- the object must remain unseen from query time through clip end.
+	"""
+	if span.in_view:
+		return None
+	if span.end_sec < span.start_sec:
+		return None
+
+	for _ in range(max_tries):
+		if span.end_sec <= span.start_sec + 1e-9:
+			t_sec = span.start_sec
+		else:
+			t_sec = rng.uniform(span.start_sec, span.end_sec)
+
+		clip_start_time_sec = _sample_clip_start_from_prior_track(
+			video_id=video_id,
+			assoc_id=assoc_id,
+			query_time_sec=t_sec,
+			annotations_root=annotations_root,
+			rng=rng,
+		)
+		if clip_start_time_sec is None:
+			continue
+
+		if span.end_sec <= t_sec + 1e-9:
+			clip_end_time_sec = t_sec
+		else:
+			clip_end_time_sec = rng.uniform(t_sec, span.end_sec)
+
+		clip_duration_sec = clip_end_time_sec - clip_start_time_sec
+		if clip_duration_sec < -1e-9:
+			continue
+
+		return t_sec, clip_start_time_sec, clip_end_time_sec, max(0.0, clip_duration_sec)
+
+	return None
+
+
 def generate_key_frames_for_video(
 	video_id: str,
 	annotations_root: str | Path,
@@ -267,17 +449,10 @@ def generate_key_frames_for_video(
 	centroid_shift_threshold_m: float = 0.15,
 	start_time_sec: float | None = None,
 	end_time_sec: float | None = None,
+	random_seed: int = 42,
+	max_random_clip_margin_sec: float = 20.0,
 ) -> list[KeyFrameCandidate]:
-	"""Select key frame candidates exactly from README Section 8.
-
-	Pipeline:
-	1) Build per-object visibility tracks at sampled times.
-	2) Rank objects by relocation activity.
-	3) For each object, find OOS spans with duration >= h and select t near gap_start + h.
-	4) Enforce stronger OOS context around t when applicable.
-	5) Prefer one candidate per distinct fixture before repeats.
-	6) Stop once max_questions_per_video is reached.
-	"""
+	"""Select key frame candidates with random symmetric clip windows around t."""
 	if horizon_sec <= 0:
 		raise ValueError("horizon_sec must be > 0")
 	if max_questions_per_video <= 0:
@@ -295,13 +470,14 @@ def generate_key_frames_for_video(
 	if not tracks:
 		return []
 
+	rng = random.Random((video_id, random_seed).__repr__())
+
 	ranked = rank_objects_by_relocation(
 		video_id=video_id,
 		annotations_root=annotations_root,
 		centroid_shift_threshold_m=centroid_shift_threshold_m,
 	)
 
-	# Assume one global uniform sampling grid from track generator.
 	any_track = next(iter(tracks.values()))
 	video_start_sec = min(any_track.sampled_times_sec)
 	video_end_sec = max(any_track.sampled_times_sec)
@@ -311,21 +487,61 @@ def generate_key_frames_for_video(
 	for score in ranked:
 		if len(selected) >= max_questions_per_video:
 			break
+
 		track = tracks.get(score.assoc_id)
 		if track is None:
+			continue
+
+		object_tracks = _get_object_tracks(video_id=video_id, assoc_id=score.assoc_id, annotations_root=annotations_root)
+		if len(object_tracks) < 1:
 			continue
 
 		object_candidates: list[KeyFrameCandidate] = []
 		for span in track.spans:
 			if span.in_view:
 				continue
+
 			span_duration = span.end_sec - span.start_sec
 			if span_duration + 1e-9 < horizon_sec:
 				continue
 
-			t_sec = _select_time_for_oos_span(track, span, horizon_sec)
-			if t_sec is None:
+			stable_start_sec = _stable_start_after_last_past_track(
+				video_id=video_id,
+				assoc_id=score.assoc_id,
+				span_start_sec=span.start_sec,
+				annotations_root=annotations_root,
+				fps_for_frame_lookup=fps_for_frame_lookup,
+			)
+			if stable_start_sec is None:
 				continue
+
+			if len(_eligible_prior_tracks(
+				video_id=video_id,
+				assoc_id=score.assoc_id,
+				query_time_sec=span.start_sec,
+				annotations_root=annotations_root,
+			)) == 0:
+				continue
+
+			usable_start_sec = max(span.start_sec, stable_start_sec)
+			usable_end_sec = span.end_sec
+			usable_duration_sec = usable_end_sec - usable_start_sec
+			if usable_duration_sec + 1e-9 < horizon_sec:
+				continue
+
+			effective_span = VisibilitySpan(start_sec=usable_start_sec, end_sec=usable_end_sec, in_view=False)
+			clip_info = _sample_clip_window(
+				span=effective_span,
+				video_id=video_id,
+				assoc_id=score.assoc_id,
+				annotations_root=annotations_root,
+				rng=rng,
+			)
+			if clip_info is None:
+				continue
+
+			t_sec, clip_start_time_sec, clip_end_time_sec, clip_duration_sec = clip_info
+
 			if not _passes_stronger_context_rule(
 				span=span,
 				query_time_sec=t_sec,
@@ -334,6 +550,12 @@ def generate_key_frames_for_video(
 				video_end_sec=video_end_sec,
 				step_sec=step_sec,
 			):
+				continue
+
+			if not _has_prior_visible_context(track, t_sec):
+				continue
+
+			if clip_end_time_sec > span.end_sec + 1e-9:
 				continue
 
 			fixture = _fixture_for_object_at_time(video_id, score.assoc_id, t_sec, annotations_root)
@@ -349,6 +571,9 @@ def generate_key_frames_for_video(
 					horizon_sec=horizon_sec,
 					fixture_at_query=fixture,
 					relocation_score=score.total_score,
+					clip_start_time_sec=clip_start_time_sec,
+					clip_end_time_sec=clip_end_time_sec,
+					clip_duration_sec=clip_duration_sec,
 				)
 			)
 
@@ -373,6 +598,8 @@ def generate_key_frames_for_videos(
 	centroid_shift_threshold_m: float = 0.15,
 	start_time_sec: float | None = None,
 	end_time_sec: float | None = None,
+	random_seed: int = 42,
+	max_random_clip_margin_sec: float = 20.0,
 ) -> dict[str, list[KeyFrameCandidate]]:
 	"""Batch wrapper returning per-video key frame candidate lists."""
 	out: dict[str, list[KeyFrameCandidate]] = {}
@@ -388,6 +615,8 @@ def generate_key_frames_for_videos(
 			centroid_shift_threshold_m=centroid_shift_threshold_m,
 			start_time_sec=start_time_sec,
 			end_time_sec=end_time_sec,
+			random_seed=random_seed,
+			max_random_clip_margin_sec=max_random_clip_margin_sec,
 		)
 	return out
 
@@ -406,6 +635,9 @@ def key_frames_to_dict(candidates: list[KeyFrameCandidate]) -> list[dict[str, An
 			"horizon_sec": c.horizon_sec,
 			"fixture_at_query": c.fixture_at_query,
 			"relocation_score": c.relocation_score,
+			"clip_start_time_sec": c.clip_start_time_sec,
+			"clip_end_time_sec": c.clip_end_time_sec,
+			"clip_duration_sec": c.clip_duration_sec,
 		}
 		for c in candidates
 	]

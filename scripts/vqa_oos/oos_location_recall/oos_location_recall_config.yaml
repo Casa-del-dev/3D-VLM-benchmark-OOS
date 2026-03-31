@@ -8,7 +8,10 @@ intermediate_data_root: ../../../../hd-epic-annotations/Intermediate_data
 
 inputs:
   participants: [P01]
-  videos: [P01-20240202-161354]
+  videos: [P01-20240203-184045]
+
+fixed_clip_start_earlier_sec: 10.0
+force_clip_start_to_video_start: false
 
 sampling_fps: 2.0
 out_of_sight_horizon_sec: 2.0
