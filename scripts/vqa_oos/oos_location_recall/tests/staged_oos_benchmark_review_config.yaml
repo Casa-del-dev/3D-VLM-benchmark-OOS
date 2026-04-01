@@ -1,0 +1,10 @@
+annotations_root: D:/3D_vision/hd-epic-annotations
+
+data_root: D:/3D_vision
+video_rel_template: HD-EPIC/Videos/{participant}/{video_id}.mp4
+
+benchmark_json: ../../../outputs/staged_questions_debug/staged_oos_questions.json
+review_output_dir: ../../../outputs/staged_questions_debug/staged_oos_review
+
+fps_for_frame_lookup: 30.0
+intermediate_root: Intermediate_data

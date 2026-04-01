@@ -54,6 +54,12 @@ python scripts/vqa_oos/oos_location_recall/tests/test_in_view_track_generator.py
 python scripts/vqa_oos/oos_location_recall/tests/oos_location_recall_tester.py --video_id P01-20240203-184045 --clipOffset 20 --videoStart
 ```
 
+3. New question types
+
+```bash
+python scripts/vqa_oos/oos_location_recall/staged_oos_benchmark.py --config scripts/vqa_oos/oos_location_recall/staged_oos_benchmark_config.yaml --pre_context_sec 4.0
+```
+
 Both scripts write debug artifacts into the `outputs/` folder.
 
 ## 1. Benchmark Goal

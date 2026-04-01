@@ -438,18 +438,29 @@ def _sample_clip_window(
 	return None
 
 
+def _last_visible_time_before(track: ObjectVisibilityTrack, query_time_sec: float) -> float | None:
+    last_t = None
+    for t, v in zip(track.sampled_times_sec, track.visibility_samples):
+        if t >= query_time_sec:
+            break
+        if v:
+            last_t = t
+    return last_t
+
+
 def generate_key_frames_for_video(
-	video_id: str,
-	annotations_root: str | Path,
-	horizon_sec: float,
-	max_questions_per_video: int,
-	sampling_fps: float = 2.0,
-	fps_for_frame_lookup: float = 30.0,
-	intermediate_root: str = DEFAULT_INTERMEDIATE_ROOT,
-	centroid_shift_threshold_m: float = 0.15,
-	start_time_sec: float | None = None,
-	end_time_sec: float | None = None,
-	random_seed: int = 42,
+    video_id: str,
+    annotations_root: str | Path,
+    horizon_sec: float,
+    max_questions_per_video: int,
+    sampling_fps: float = 2.0,
+    fps_for_frame_lookup: float = 30.0,
+    intermediate_root: str = DEFAULT_INTERMEDIATE_ROOT,
+    centroid_shift_threshold_m: float = 0.15,
+    start_time_sec: float | None = None,
+    end_time_sec: float | None = None,
+    random_seed: int = 42,
+    pre_context_sec: float = 2.0,
 	max_random_clip_margin_sec: float = 20.0,
 ) -> list[KeyFrameCandidate]:
 	"""Select key frame candidates with random symmetric clip windows around t."""
@@ -530,17 +541,17 @@ def generate_key_frames_for_video(
 				continue
 
 			effective_span = VisibilitySpan(start_sec=usable_start_sec, end_sec=usable_end_sec, in_view=False)
-			clip_info = _sample_clip_window(
-				span=effective_span,
-				video_id=video_id,
-				assoc_id=score.assoc_id,
-				annotations_root=annotations_root,
-				rng=rng,
-			)
-			if clip_info is None:
+			t_sec = _select_time_for_oos_span(track, effective_span, horizon_sec)
+			if t_sec is None:
 				continue
 
-			t_sec, clip_start_time_sec, clip_end_time_sec, clip_duration_sec = clip_info
+			last_visible_time_sec = _last_visible_time_before(track, t_sec)
+			if last_visible_time_sec is None:
+				continue
+
+			clip_end_time_sec = t_sec
+			clip_start_time_sec = max(video_start_sec, last_visible_time_sec - pre_context_sec)
+			clip_duration_sec = clip_end_time_sec - clip_start_time_sec
 
 			if not _passes_stronger_context_rule(
 				span=span,
@@ -555,7 +566,8 @@ def generate_key_frames_for_video(
 			if not _has_prior_visible_context(track, t_sec):
 				continue
 
-			if clip_end_time_sec > span.end_sec + 1e-9:
+			# Make sure the answer is actually present in the clip.
+			if not (clip_start_time_sec <= last_visible_time_sec < t_sec):
 				continue
 
 			fixture = _fixture_for_object_at_time(video_id, score.assoc_id, t_sec, annotations_root)
@@ -600,6 +612,7 @@ def generate_key_frames_for_videos(
 	end_time_sec: float | None = None,
 	random_seed: int = 42,
 	max_random_clip_margin_sec: float = 20.0,
+	pre_context_sec: float = 2.0,
 ) -> dict[str, list[KeyFrameCandidate]]:
 	"""Batch wrapper returning per-video key frame candidate lists."""
 	out: dict[str, list[KeyFrameCandidate]] = {}
@@ -617,6 +630,7 @@ def generate_key_frames_for_videos(
 			end_time_sec=end_time_sec,
 			random_seed=random_seed,
 			max_random_clip_margin_sec=max_random_clip_margin_sec,
+			pre_context_sec=pre_context_sec,
 		)
 	return out
 

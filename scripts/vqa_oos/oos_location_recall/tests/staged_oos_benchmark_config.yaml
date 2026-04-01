@@ -1,0 +1,25 @@
+annotations_root: D:/3D_vision/hd-epic-annotations
+intermediate_root: Intermediate_data
+
+inputs:
+  videos:
+    - P01-20240203-184045
+
+sampling_fps: 2.0
+fps_for_frame_lookup: 30.0
+out_of_sight_horizon_sec: 2.0
+max_questions_per_video: 20
+random_seed: 42
+pre_context_sec: 2.0
+
+absolute:
+  num_choices: 5
+
+camera_relative:
+  back_threshold_deg: 135.0
+
+camera_pose_change:
+  no_change_threshold_deg: 30.0
+  rotated_back_threshold_deg: 135.0
+
+output_json: ../../../outputs/staged_questions_debug/staged_oos_questions.json
