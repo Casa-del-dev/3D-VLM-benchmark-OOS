@@ -57,7 +57,13 @@ python scripts/vqa_oos/oos_location_recall/tests/oos_location_recall_tester.py -
 3. New question types
 
 ```bash
-python scripts/vqa_oos/oos_location_recall/staged_oos_benchmark.py --config scripts/vqa_oos/oos_location_recall/staged_oos_benchmark_config.yaml --pre_context_sec 4.0
+python scripts/vqa_oos/oos_location_recall/tests/staged_oos_benchmark.py --config scripts/vqa_oos/oos_location_recall/tests/staged_oos_benchmark_config.yaml --pre_context_sec 4.0
+```
+
+And to view the question
+
+```bash
+python scripts/vqa_oos/oos_location_recall/tests/staged_oos_benchmark_review.py --config scripts/vqa_oos/oos_location_recall/tests/staged_oos_benchmark_review_config.yaml
 ```
 
 Both scripts write debug artifacts into the `outputs/` folder.
