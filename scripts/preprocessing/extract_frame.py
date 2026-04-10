@@ -11,7 +11,7 @@ cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
 ret, frame = cap.read()
 
 if ret:
-    cv2.imwrite("frame_208.jpg", frame)
+    cv2.imwrite("data/for_debug/time_208.jpg", frame)
     print("Frame saved!")
 else:
     print("Failed to extract frame.")

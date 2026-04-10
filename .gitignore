@@ -5,6 +5,6 @@ outputs/
 data/HD-EPIC/
 hd-epic-annotations/
 tracks.json
-.png
-.jpg
+*.png
+*.jpg
 in_view_output.yaml
