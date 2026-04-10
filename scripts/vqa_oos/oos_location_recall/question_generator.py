@@ -13,8 +13,7 @@ from anchored_coords import pick_central_anchor
 from in_view_determination import DEFAULT_INTERMEDIATE_ROOT, determine_in_view_objects, load_json, load_jsonl
 from key_frame_generator import KeyFrameCandidate, generate_key_frames_for_videos
 from relative_answer_determ import determine_relative_answer_for_pair
-
-
+from camera_rotation_determ import determine_camera_rotation_answer,is_rotation_sample_stable
 @dataclass(frozen=True)
 class GenerationConfig:
 	annotations_root: Path
@@ -23,6 +22,7 @@ class GenerationConfig:
 	max_questions_per_video: int
 	absolute_enabled: bool
 	relative_enabled: bool
+	camera_rotation_enabled: bool
 	relative_border_tolerance_deg: float
 	absolute_num_choices: int
 	random_seed: int
@@ -31,6 +31,8 @@ class GenerationConfig:
 	output_json: Path
 	fixed_clip_start_earlier_sec: float
 	force_clip_start_to_video_start: bool
+	camera_rotation_axis: str
+	camera_rotation_no_motion_thresh_deg: float
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -94,6 +96,7 @@ def _load_config(config_path: Path) -> GenerationConfig:
 	question_classes = raw.get("question_classes", {})
 	relative_cfg = raw.get("relative", {})
 	absolute_cfg = raw.get("absolute", {})
+	camera_cfg = raw.get("camera_rotation", {})
 
 	return GenerationConfig(
 		annotations_root=(root / raw["annotations_root"]).resolve(),
@@ -102,14 +105,19 @@ def _load_config(config_path: Path) -> GenerationConfig:
 		max_questions_per_video=int(raw.get("max_questions_per_video", 20)),
 		absolute_enabled=bool(question_classes.get("absolute", True)),
 		relative_enabled=bool(question_classes.get("relative", True)),
+		camera_rotation_enabled=bool(question_classes.get("camera_rotation", True)),
+
 		relative_border_tolerance_deg=float(relative_cfg.get("border_tolerance_deg", 10.0)),
 		absolute_num_choices=int(absolute_cfg.get("num_choices", 5)),
 		random_seed=int(raw.get("random_seed", 42)),
 		videos=[str(v) for v in inputs.get("videos", [])],
 		participants=[str(p) for p in inputs.get("participants", [])],
 		output_json=(root / raw.get("output_json", "oos_location_recall_questions.json")).resolve(),
+		
 		fixed_clip_start_earlier_sec=float(raw.get("fixed_clip_start_earlier_sec", 0.0)),
 		force_clip_start_to_video_start=bool(raw.get("force_clip_start_to_video_start", False)),
+		camera_rotation_axis=str(camera_cfg.get("axis", "yaw")),
+		camera_rotation_no_motion_thresh_deg=float(camera_cfg.get("no_motion_thresh_deg", 5.0)),
 	)
 
 
@@ -169,6 +177,7 @@ def generate_questions_from_config(cfg: GenerationConfig) -> dict[str, dict[str,
 	results: dict[str, dict[str, Any]] = {}
 	abs_idx = 0
 	rel_idx = 0
+	cam_idx = 0
 
 	for video_id in video_ids:
 		candidates = sorted(keyframes_by_video.get(video_id, []), key=lambda c: c.query_time_sec)
@@ -280,6 +289,43 @@ def generate_questions_from_config(cfg: GenerationConfig) -> dict[str, dict[str,
 					rel_idx += 1
 				except (KeyError, ValueError):
 					pass
+			if cfg.camera_rotation_enabled:
+				try:
+					cam_answer = determine_camera_rotation_answer(
+						video_id=cand.video_id,
+						start_time_sec=shifted_clip_start_time_sec,
+						end_time_sec=cand.query_time_sec,
+						annotations_root=cfg.annotations_root,
+						no_motion_thresh_deg=cfg.camera_rotation_no_motion_thresh_deg,
+					)
+					if not is_rotation_sample_stable(
+						cam_answer.signed_rotation_deg,
+						no_motion_thresh_deg=cfg.camera_rotation_no_motion_thresh_deg,
+					):
+						continue
+
+					if abs(cam_answer.signed_rotation_deg) > 20.0: continue
+			
+					time_tok = _time_token(query_time_in_clip_sec, input_key="video 1")
+					qid = f"camera_rotation_{horizon_token}_{cam_idx}"
+					results[qid] = {
+						**base_fields,
+						"question": (
+							f"Between the start of the clip and the current time {time_tok}, "
+							f"how did the camera mainly rotate?"
+						),
+						"choices": cam_answer.choices,
+						"correct_idx": cam_answer.correct_idx,
+						"camera_signed_rotation_deg": cam_answer.signed_rotation_deg,
+						"camera_rotation_direction": cam_answer.direction,
+						"camera_rotation_angle_bucket": cam_answer.angle_bucket,
+						"angle_deg": round(cam_answer.signed_rotation_deg, 2),
+
+						"question_class": "camera_rotation",
+					}
+					cam_idx += 1
+				except (KeyError, ValueError, FileNotFoundError):
+					pass
 
 	return results
 
@@ -344,6 +390,7 @@ def main() -> None:
 		max_questions_per_video=base_cfg.max_questions_per_video,
 		absolute_enabled=base_cfg.absolute_enabled,
 		relative_enabled=base_cfg.relative_enabled,
+		camera_rotation_enabled=base_cfg.camera_rotation_enabled,
 		relative_border_tolerance_deg=base_cfg.relative_border_tolerance_deg,
 		absolute_num_choices=base_cfg.absolute_num_choices,
 		random_seed=base_cfg.random_seed,
@@ -352,6 +399,8 @@ def main() -> None:
 		output_json=output_json,
 		fixed_clip_start_earlier_sec=clip_offset,
 		force_clip_start_to_video_start=force_video_start,
+		camera_rotation_axis=base_cfg.camera_rotation_axis,
+		camera_rotation_no_motion_thresh_deg=base_cfg.camera_rotation_no_motion_thresh_deg,
 	)
 
 	questions = generate_questions_from_config(cfg)
