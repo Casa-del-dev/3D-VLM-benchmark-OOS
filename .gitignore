@@ -2,3 +2,9 @@ __pycache__/
 *.py[cod]
 outputs/
 .DS_Store
+data/HD-EPIC/
+hd-epic-annotations/
+tracks.json
+*.png
+*.jpg
+in_view_output.yaml

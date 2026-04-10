@@ -34,8 +34,8 @@ DEFAULT_INTERMEDIATE_ROOT = "Intermediate_data"
 
 DEFAULT_VIDEO_ID = "P01-20240203-184045"
 DEFAULT_VIDEO_REL_PATH = "HD-EPIC/Videos/P01/P01-20240203-184045.mp4"
-DEFAULT_DATA_ROOT_REL = "../../../../.."
-DEFAULT_ANN_ROOT_REL = "../../../../../hd-epic-annotations"
+DEFAULT_DATA_ROOT_REL = "../../../../data"
+DEFAULT_ANN_ROOT_REL = "../../../../hd-epic-annotations"
 DEFAULT_INTERMEDIATE_ROOT = "Intermediate_data"
 
 

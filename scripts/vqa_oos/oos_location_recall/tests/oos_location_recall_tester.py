@@ -39,7 +39,7 @@ DEFAULT_OUTPUT_DIR_REL = "../../../outputs/oos_location_recall_debug"
 """
 
 DEFAULT_CONFIG = MODULE_DIR / "oos_location_recall_config.yaml"
-DEFAULT_DATA_ROOT_REL = "../../../../../"
+DEFAULT_DATA_ROOT_REL = "../../../../../data"
 DEFAULT_VIDEO_REL_TEMPLATE = "HD-EPIC/Videos/{participant}/{video_id}.mp4"
 DEFAULT_OUTPUT_DIR_REL = "../../../outputs/oos_location_recall_debug"
 
