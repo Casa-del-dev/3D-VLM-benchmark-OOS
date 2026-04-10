@@ -6,7 +6,7 @@ from groundingdino_roi_visibility import (
     TemporalSmoother,
 )
 
-image = cv2.imread("/Users/fangzhouma/Desktop/3d_vision/3D-VLM-benchmark-OOS/annotated.png")
+image = cv2.imread("/Users/fangzhouma/Desktop/3d_vision/3D-VLM-benchmark-OOS/frame_208.jpg")
 
 detector = GroundingDINODetector(
     model_id="IDEA-Research/grounding-dino-tiny"
@@ -14,8 +14,7 @@ detector = GroundingDINODetector(
 
 estimator = ROIGroundingDINOVisibilityEstimator(
     detector=detector,
-    roi_scale=2.2,
-    min_roi_half_size_px=64,
+    roi_scale=1.2,
     box_threshold=0.30,
     text_threshold=0.25,
     visible_threshold=0.62,
@@ -26,16 +25,17 @@ estimator = ROIGroundingDINOVisibilityEstimator(
 projected_uv = (604.697959, 1021.778181)
 
 text_prompt = [
-    "a mall plate",
+    "a small plate",
 ]
 
 result, debug = estimator.estimate(
     image_bgr=image,
     projected_uv=projected_uv,
     text_prompt=text_prompt,
-    expected_box_size_px=(120, 120),   # optional
-    uncertainty_px=50,
+    expected_box_size_px=(120, 120),   
+    uncertainty_px=10,
     draw_debug=True,
+    last_seen_bbox=[912.191, 859.24103, 1010.8720000000001, 890.53]
 )
 
 print(result.label)

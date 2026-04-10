@@ -199,7 +199,6 @@ class ROIGroundingDINOVisibilityEstimator:
         self,
         detector: GroundingDINODetector,
         roi_scale: float = 2.0,
-        min_roi_half_size_px: int = 48,
         box_threshold: float = 0.30,
         text_threshold: float = 0.25,
         visible_threshold: float = 0.62,
@@ -208,7 +207,6 @@ class ROIGroundingDINOVisibilityEstimator:
     ) -> None:
         self.detector = detector
         self.roi_scale = float(roi_scale)
-        self.min_roi_half_size_px = int(min_roi_half_size_px)
         self.box_threshold = float(box_threshold)
         self.text_threshold = float(text_threshold)
         self.visible_threshold = float(visible_threshold)
@@ -244,29 +242,46 @@ class ROIGroundingDINOVisibilityEstimator:
             phrase=det.phrase,
         )
 
+
     def build_roi(
         self,
         image_shape: Tuple[int, int, int],
         projected_uv: Tuple[float, float],
         expected_box_size_px: Optional[Tuple[float, float]] = None,
         uncertainty_px: int = 40,
+        last_seen_bbox: Optional[Tuple[int, int, int, int]] = None,
     ) -> ROIBox:
         image_h, image_w = image_shape[:2]
         u, v = projected_uv
 
-        if expected_box_size_px is None:
-            half_size = self.min_roi_half_size_px + int(uncertainty_px)
-        else:
+        # ROI center
+        cx, cy = float(u), float(v)
+
+        if last_seen_bbox is not None:
+            bx1, by1, bx2, by2 = last_seen_bbox
+            box_w = max(1.0, float(bx2 - bx1))
+            box_h = max(1.0, float(by2 - by1))
+
+            half_w = int(0.5 * self.roi_scale * box_w + uncertainty_px)
+            half_h = int(0.5 * self.roi_scale * box_h + uncertainty_px)
+
+        elif expected_box_size_px is not None:
             exp_w, exp_h = expected_box_size_px
-            base = 0.5 * max(float(exp_w), float(exp_h))
-            half_size = int(max(self.min_roi_half_size_px, self.roi_scale * base + uncertainty_px))
+
+            half_w = int(0.5 * self.roi_scale * float(exp_w) + uncertainty_px)
+            half_h = int(0.5 * self.roi_scale * float(exp_h) + uncertainty_px)
+
+        else:
+            half_w = uncertainty_px
+            half_h = uncertainty_px
 
         roi = ROIBox(
-            x1=int(round(u)) - half_size,
-            y1=int(round(v)) - half_size,
-            x2=int(round(u)) + half_size,
-            y2=int(round(v)) + half_size,
+            x1=int(round(cx)) - half_w,
+            y1=int(round(cy)) - half_h,
+            x2=int(round(cx)) + half_w,
+            y2=int(round(cy)) + half_h,
         )
+
         return roi.clip(image_w, image_h)
 
     def _score_detection(self, det: DetectionResult, roi: ROIBox, projected_uv: Tuple[float, float]) -> float:
@@ -285,6 +300,7 @@ class ROIGroundingDINOVisibilityEstimator:
         expected_box_size_px: Optional[Tuple[float, float]] = None,
         uncertainty_px: int = 40,
         draw_debug: bool = False,
+        last_seen_bbox: Optional[Tuple[int, int, int, int]] = None,
     ) -> Tuple[VisibilityResult, Optional[np.ndarray]]:
         image_h, image_w = image_bgr.shape[:2]
         u, v = projected_uv
@@ -307,6 +323,7 @@ class ROIGroundingDINOVisibilityEstimator:
             projected_uv=projected_uv,
             expected_box_size_px=expected_box_size_px,
             uncertainty_px=uncertainty_px,
+            last_seen_bbox=last_seen_bbox,
         )
         roi_img = image_bgr[roi.y1:roi.y2, roi.x1:roi.x2]
 
@@ -408,8 +425,7 @@ def example_usage() -> None:
     detector = GroundingDINODetector(model_id="IDEA-Research/grounding-dino-tiny")
     estimator = ROIGroundingDINOVisibilityEstimator(
         detector=detector,
-        roi_scale=2.2,
-        min_roi_half_size_px=64,
+        roi_scale=1.2,
         box_threshold=0.30,
         text_threshold=0.25,
         visible_threshold=0.62,
