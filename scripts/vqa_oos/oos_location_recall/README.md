@@ -26,6 +26,19 @@ brew install ffmpeg
 
 ### Run Question Generation
 
+#### To generate in staged format
+
+1. precompute in-view tracks of all objects in a video
+```bash
+python scripts/vqa_oos/oos_location_recall/precompute_inview_tracks.py --config scripts/vqa_oos/oos_location_recall/staged_oos_question_generator_config.yaml  
+```
+2. Generate staged questions 
+So far, the question include: visibility check, last visible frame detetcion, nearest fixture detection, camera viewing direction tracking
+```bash
+python scripts/vqa_oos/oos_location_recall/staged_oos_question_generator.py --config scripts/vqa_oos/oos_location_recall/staged_oos_question_generator_config.yaml
+```
+
+#### Ivo's version
 From repository root:
 
 ```bash
