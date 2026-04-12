@@ -12,14 +12,17 @@ from pathlib import Path
 from typing import Any
 
 from in_view_determination import DEFAULT_INTERMEDIATE_ROOT
-from in_view_track_generator import generate_in_view_tracks, tracks_to_dict
+from in_view_track_generator_copy import generate_in_view_tracks, tracks_to_dict
+
+
+FORMAT_VERSION = 5
 
 
 @dataclass(frozen=True)
 class PrecomputeConfig:
     annotations_root: Path
     video_ids: list[str]
-    sampling_fps: float = 2.0
+    sampling_fps: float = 1.0
     fps_for_frame_lookup: float = 30.0
     intermediate_root: str = DEFAULT_INTERMEDIATE_ROOT
     output_json_by_video: dict[str, Path] | None = None
@@ -99,7 +102,7 @@ def _build_payload_for_video(
 ) -> dict[str, Any]:
     if not tracks:
         return {
-            "format_version": 2,
+            "format_version": FORMAT_VERSION,
             "video_id": video_id,
             "sampling_fps": cfg.sampling_fps,
             "fps_for_frame_lookup": cfg.fps_for_frame_lookup,
@@ -117,7 +120,7 @@ def _build_payload_for_video(
     }
 
     return {
-        "format_version": 2,
+        "format_version": FORMAT_VERSION,
         "video_id": video_id,
         "sampling_fps": cfg.sampling_fps,
         "fps_for_frame_lookup": cfg.fps_for_frame_lookup,

@@ -262,6 +262,62 @@ def load_frame_context(
 		mask_info_video=mask_info[video_id],
 	)
 
+def project_track_reference_point(
+    *,
+    video_id: str,
+    assoc_id: str,
+    time_sec: float,
+    annotations_root: str | Path,
+    fps: float = 30.0,
+    intermediate_root: str = DEFAULT_INTERMEDIATE_ROOT,
+    reference: str = "end",
+) -> dict[str, Any] | None:
+    ctx = load_frame_context(
+        video_id=video_id,
+        time_sec=time_sec,
+        annotations_root=annotations_root,
+        fps=fps,
+        intermediate_root=intermediate_root,
+    )
+
+    if assoc_id not in ctx.assoc_objects:
+        return None
+
+    obj = ctx.assoc_objects[assoc_id]
+    track, mode, _ = choose_track_for_time(obj["tracks"], time_sec)
+    if track is None:
+        return None
+
+    pick = "latest" if reference == "end" else "first"
+    mask = get_mask_from_track(ctx.mask_info_video, track, pick=pick)
+    if mask is None:
+        return None
+
+    world_xyz = mask["3d_location"]
+    cam_xyz = transform_point(ctx.T_camera_world, world_xyz)
+
+    if ctx.model_name == "CameraModelType.FISHEYE624":
+        pixel_xy, depth, valid = project_fisheye624(cam_xyz, ctx.projection_params)
+    else:
+        pixel_xy, depth, valid = None, cam_xyz[2], False
+
+    in_view = valid and point_in_image(pixel_xy, ctx.image_width, ctx.image_height)
+
+    return {
+        "assoc_id": assoc_id,
+        "track_id": track["track_id"],
+        "time_segment": track["time_segment"],
+        "reference": reference,
+        "mask_id": mask["mask_id"],
+        "frame_number": int(mask["frame_number"]) if mask.get("frame_number") is not None else None,
+        "fixture": mask.get("fixture"),
+        "world_coordinates": world_xyz,
+        "camera_coordinates": cam_xyz,
+        "projected_pixel": pixel_xy,
+        "depth_in_camera": depth,
+        "in_view": in_view,
+        "selection_mode": mode,
+    }
 
 def determine_in_view_objects(
 	video_id: str,

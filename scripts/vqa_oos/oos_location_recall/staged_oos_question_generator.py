@@ -17,8 +17,13 @@ from typing import Any, Callable
 
 import key_frame_generator as kfg
 from abs_answer_determ import build_fixture_vocabulary, determine_absolute_answer
-from in_view_determination import DEFAULT_INTERMEDIATE_ROOT, determine_in_view_objects, load_frame_context
-from in_view_track_generator import ObjectVisibilityTrack, VisibilitySpan
+from in_view_determination import (
+    DEFAULT_INTERMEDIATE_ROOT,
+    determine_in_view_objects,
+    load_frame_context,
+    project_track_reference_point,
+)
+from in_view_track_generator_copy import ObjectVisibilityTrack, VisibilitySpan
 from key_frame_generator import KeyFrameCandidate
 
 
@@ -47,8 +52,12 @@ class BenchmarkConfig:
 class LastVisibleInfo:
     sampled_time_sec: float
     projected_pixel: list[float] | None
+    camera_coordinates: list[float] | None
     frame_index: int | None
     status: str
+    fixture: str | None = None
+    world_coordinates: list[float] | None = None
+    reference_source: str | None = None
 
 
 class VisibilityTrackStore:
@@ -63,6 +72,19 @@ class VisibilityTrackStore:
         video = self.raw_by_video.get(video_id, {})
         return video.get("object_tracks", {})
 
+    @staticmethod
+    def _times_index(times: list[Any], time_sec: float) -> int | None:
+        idx = bisect.bisect_left(times, time_sec)
+        if idx >= len(times) or abs(float(times[idx]) - float(time_sec)) > 1e-6:
+            return None
+        return idx
+
+    @staticmethod
+    def _list_value(seq: list[Any] | None, idx: int) -> Any:
+        if seq is None or idx < 0 or idx >= len(seq):
+            return None
+        return seq[idx]
+
     def get_object_tracks(self, video_id: str) -> dict[str, ObjectVisibilityTrack]:
         out: dict[str, ObjectVisibilityTrack] = {}
         for assoc_id, tr in self.get_track_dict(video_id).items():
@@ -71,6 +93,28 @@ class VisibilityTrackStore:
                 name=str(tr["name"]),
                 sampled_times_sec=[float(t) for t in tr["sampled_times_sec"]],
                 visibility_samples=[bool(v) for v in tr["visibility_samples"]],
+                queryable_samples=[bool(v) for v in tr.get("queryable_samples", tr["visibility_samples"])],
+                status_samples=[str(v) for v in tr.get("status_samples", ["ok" if bool(v) else "not_in_view_from_track" for v in tr["visibility_samples"]])],
+                projected_pixel_samples=[
+                    [float(x) for x in v] if v is not None else None
+                    for v in tr.get("projected_pixel_samples", [None] * len(tr["sampled_times_sec"]))
+                ],
+                camera_coordinate_samples=[
+                    [float(x) for x in v] if v is not None else None
+                    for v in tr.get("camera_coordinate_samples", [None] * len(tr["sampled_times_sec"]))
+                ],
+                frame_index_samples=[
+                    int(v) if v is not None else None
+                    for v in tr.get("frame_index_samples", [None] * len(tr["sampled_times_sec"]))
+                ],
+                last_visible_index_before_each_sample=[
+                    int(v) if v is not None else None
+                    for v in tr.get("last_visible_index_before_each_sample", [None] * len(tr["sampled_times_sec"]))
+                ],
+                last_queryable_index_before_each_sample=[
+                    int(v) if v is not None else None
+                    for v in tr.get("last_queryable_index_before_each_sample", [None] * len(tr["sampled_times_sec"]))
+                ],
                 spans=[
                     VisibilitySpan(
                         start_sec=float(sp["start_sec"]),
@@ -90,19 +134,37 @@ class VisibilityTrackStore:
         result: dict[str, dict[str, Any]] = {}
         for assoc_id, tr in tracks.items():
             times = tr.get("sampled_times_sec", [])
-            samples = tr.get("visibility_samples", [])
-            idx = bisect.bisect_left(times, time_sec)
-            if idx >= len(times) or abs(float(times[idx]) - float(time_sec)) > 1e-6:
+            idx = self._times_index(times, time_sec)
+            if idx is None:
                 continue
 
-            is_visible = bool(samples[idx])
+            visibility_samples = tr.get("visibility_samples", [])
+            queryable_samples = tr.get("queryable_samples", visibility_samples)
+            status_samples = tr.get("status_samples", [])
+            projected_pixel_samples = tr.get("projected_pixel_samples", [])
+            camera_coordinate_samples = tr.get("camera_coordinate_samples", [])
+            frame_index_samples = tr.get("frame_index_samples", [])
+
+            is_visible = bool(self._list_value(visibility_samples, idx))
+            is_queryable = bool(self._list_value(queryable_samples, idx))
+            status = self._list_value(status_samples, idx)
+            if status is None:
+                if is_visible and is_queryable:
+                    status = "ok"
+                elif is_visible:
+                    status = "in_motion"
+                else:
+                    status = "not_in_view_from_track"
+
             result[assoc_id] = {
                 "assoc_id": assoc_id,
                 "name": tr.get("name"),
-                "status": "ok" if is_visible else "not_in_view_from_track",
+                "status": str(status),
                 "in_view": is_visible,
-                "projected_pixel": None,
-                "frame_number": None,
+                "queryable": is_queryable,
+                "projected_pixel": self._list_value(projected_pixel_samples, idx),
+                "camera_coordinates": self._list_value(camera_coordinate_samples, idx),
+                "frame_number": self._list_value(frame_index_samples, idx),
             }
         return result
 
@@ -117,17 +179,37 @@ class VisibilityTrackStore:
         if track is None:
             return None
 
-        times = [float(t) for t in track.get("sampled_times_sec", [])]
-        samples = [bool(v) for v in track.get("visibility_samples", [])]
-        idx = bisect.bisect_left(times, query_time_sec) - 1
+        times = track.get("sampled_times_sec", [])
+        idx = self._times_index(times, query_time_sec)
+        if idx is None:
+            idx = bisect.bisect_left(times, query_time_sec)
+            if idx >= len(times):
+                idx = len(times) - 1
 
-        while idx >= 0 and times[idx] >= clip_start_time_sec - 1e-9:
-            if samples[idx]:
+        last_visible_idxs = track.get("last_visible_index_before_each_sample")
+        if last_visible_idxs is not None and idx < len(last_visible_idxs):
+            last_idx = last_visible_idxs[idx]
+            if last_idx is not None and float(times[last_idx]) >= clip_start_time_sec - 1e-9:
+                return LastVisibleInfo(
+                    sampled_time_sec=float(times[last_idx]),
+                    projected_pixel=self._list_value(track.get("projected_pixel_samples", []), last_idx),
+                    camera_coordinates=self._list_value(track.get("camera_coordinate_samples", []), last_idx),
+                    frame_index=self._list_value(track.get("frame_index_samples", []), last_idx),
+                    status=str(self._list_value(track.get("status_samples", []), last_idx) or "ok"),
+                    reference_source="precomputed_visibility_track",
+                )
+                
+        visibility_samples = track.get("visibility_samples", [])
+        idx = min(idx - 1 if self._times_index(times, query_time_sec) is not None else idx, len(times) - 1)
+        while idx >= 0 and float(times[idx]) >= clip_start_time_sec - 1e-9:
+            if bool(self._list_value(visibility_samples, idx)):
                 return LastVisibleInfo(
                     sampled_time_sec=float(times[idx]),
-                    projected_pixel=None,
-                    frame_index=None,
-                    status="ok",
+                    projected_pixel=self._list_value(track.get("projected_pixel_samples", []), idx),
+                    camera_coordinates=self._list_value(track.get("camera_coordinate_samples", []), idx),
+                    frame_index=self._list_value(track.get("frame_index_samples", []), idx),
+                    status=str(self._list_value(track.get("status_samples", []), idx) or "ok"),
+                    reference_source="precomputed_visibility_track",
                 )
             idx -= 1
         return None
@@ -158,13 +240,11 @@ class RuntimeCaches:
     def states_by_assoc_id(self, video_id: str, time_sec: float) -> dict[str, Any]:
         time_sec = self._norm_time(time_sec)
 
-        # Prefer precomputed visibility tracks when available.
         if self.visibility_store.has_video(video_id):
             states = self.visibility_store.get_states_by_assoc_id(video_id, time_sec)
             if states:
                 return states
 
-        # Fallback to live visibility computation.
         return self.live_states_by_assoc_id(video_id, time_sec)
 
     @lru_cache(maxsize=10000)
@@ -215,8 +295,8 @@ def _is_visible_state(state: Any) -> bool:
     if state is None:
         return False
     if isinstance(state, dict):
-        return bool(state.get("status") == "ok" and state.get("in_view"))
-    return bool(state.status == "ok" and state.in_view)
+        return bool(state.get("in_view"))
+    return bool((state.status == "ok" and state.in_view) or state.status == "in_motion")
 
 
 def _state_attr(state: Any, name: str, default: Any = None) -> Any:
@@ -232,7 +312,6 @@ def _find_last_visible_info(
     cfg: BenchmarkConfig,
     caches: RuntimeCaches,
 ) -> LastVisibleInfo | None:
-    # Prefer precomputed visibility tracks when available to find the timestamp efficiently.
     if caches.visibility_store.has_video(candidate.video_id):
         last_visible = caches.visibility_store.find_last_visible_before(
             video_id=candidate.video_id,
@@ -241,24 +320,8 @@ def _find_last_visible_info(
             clip_start_time_sec=candidate.clip_start_time_sec,
         )
         if last_visible is not None:
-            # Recover richer metadata with a single live lookup at the chosen timestamp.
-            state = caches.live_states_by_assoc_id(
-                candidate.video_id,
-                round(last_visible.sampled_time_sec, 6),
-            ).get(candidate.assoc_id)
+            return last_visible
 
-            projected_pixel = _state_attr(state, "projected_pixel")
-            frame_number = _state_attr(state, "frame_number")
-            status = _state_attr(state, "status", last_visible.status)
-
-            return LastVisibleInfo(
-                sampled_time_sec=last_visible.sampled_time_sec,
-                projected_pixel=[float(v) for v in projected_pixel] if projected_pixel is not None else None,
-                frame_index=int(frame_number) if frame_number is not None else None,
-                status=str(status),
-            )
-
-    # Fallback to live visibility computation if no precomputed track is available.
     step = 1.0 / cfg.sampling_fps
     t = candidate.query_time_sec - step
     while t >= candidate.clip_start_time_sec - 1e-9:
@@ -266,14 +329,61 @@ def _find_last_visible_info(
         if _is_visible_state(state):
             projected_pixel = _state_attr(state, "projected_pixel")
             frame_number = _state_attr(state, "frame_number")
+            camera_coordinates = _state_attr(state, "camera_coordinates")
             return LastVisibleInfo(
                 sampled_time_sec=float(round(t, 6)),
                 projected_pixel=[float(v) for v in projected_pixel] if projected_pixel is not None else None,
+                camera_coordinates=[float(v) for v in camera_coordinates] if camera_coordinates is not None else None,
                 frame_index=int(frame_number) if frame_number is not None else None,
-                status="ok",
+                status=str(_state_attr(state, "status", "ok")),
+                fixture=_state_attr(state, "fixture"),
+                world_coordinates=_state_attr(state, "world_coordinates"),
+                reference_source="live_visibility_scan",
             )
         t -= step
     return None
+
+
+def _fill_last_visible_info_from_motion_track(
+    last_visible: LastVisibleInfo,
+    candidate: KeyFrameCandidate,
+    cfg: BenchmarkConfig,
+) -> LastVisibleInfo:
+    needs_fallback = (
+        last_visible.status == "in_motion"
+        and (
+            last_visible.projected_pixel is None
+            or last_visible.camera_coordinates is None
+            or last_visible.frame_index is None
+            or last_visible.fixture is None
+            or last_visible.world_coordinates is None
+        )
+    )
+    if not needs_fallback:
+        return last_visible
+
+    ref = project_track_reference_point(
+        video_id=candidate.video_id,
+        assoc_id=candidate.assoc_id,
+        time_sec=last_visible.sampled_time_sec,
+        annotations_root=cfg.annotations_root,
+        fps=cfg.fps_for_frame_lookup,
+        intermediate_root=cfg.intermediate_root,
+        reference="end",
+    )
+    if ref is None:
+        return last_visible
+
+    return LastVisibleInfo(
+        sampled_time_sec=last_visible.sampled_time_sec,
+        projected_pixel=[float(v) for v in ref["projected_pixel"]] if ref.get("projected_pixel") is not None else last_visible.projected_pixel,
+        camera_coordinates=[float(v) for v in ref["camera_coordinates"]] if ref.get("camera_coordinates") is not None else last_visible.camera_coordinates,
+        frame_index=int(ref["frame_number"]) if ref.get("frame_number") is not None else last_visible.frame_index,
+        status=last_visible.status,
+        fixture=ref.get("fixture") if ref.get("fixture") is not None else last_visible.fixture,
+        world_coordinates=[float(v) for v in ref["world_coordinates"]] if ref.get("world_coordinates") is not None else last_visible.world_coordinates,
+        reference_source="motion_track_end_fallback",
+    )
 
 
 def _camera_forward_world(ctx: Any) -> tuple[float, float]:
@@ -401,7 +511,10 @@ def _build_step1_visibility(candidate: KeyFrameCandidate, object_state: Any, tim
         "answer_metadata": {
             "status": _state_attr(object_state, "status"),
             "in_view": _state_attr(object_state, "in_view"),
+            "queryable": _state_attr(object_state, "queryable"),
             "projected_pixel": _state_attr(object_state, "projected_pixel"),
+            "camera_coordinates": _state_attr(object_state, "camera_coordinates"),
+            "frame_index": _state_attr(object_state, "frame_number"),
         },
     }
 
@@ -420,8 +533,13 @@ def _build_step2_last_visible(candidate: KeyFrameCandidate, time_tok: str, last_
             "sampled_last_visible_time_sec": last_visible.sampled_time_sec,
             "sampled_last_visible_time_in_clip_sec": last_visible.sampled_time_sec - candidate.clip_start_time_sec,
             "projected_pixel": last_visible.projected_pixel,
+            "camera_coordinates": last_visible.camera_coordinates,
             "frame_index": last_visible.frame_index,
-            "note": "This answer uses the precomputed visibility track when available, otherwise falls back to live visibility computation.",
+            "status": last_visible.status,
+            "fixture": last_visible.fixture,
+            "world_coordinates": last_visible.world_coordinates,
+            "reference_source": last_visible.reference_source,
+            "note": "Uses the precomputed visibility track when available, falls back to live visibility computation, and for in-motion references can project the motion-track endpoint.",
         },
     }
 
@@ -429,14 +547,36 @@ def _build_step2_last_visible(candidate: KeyFrameCandidate, time_tok: str, last_
 def _build_step3_fixture(
     candidate: KeyFrameCandidate,
     *,
-    reference_time_sec: float,
+    last_visible: LastVisibleInfo,
     fixture_vocab: list[str],
     rng: random.Random,
     cfg: BenchmarkConfig,
 ) -> dict[str, Any]:
+    if last_visible.fixture is not None:
+        choices = [str(last_visible.fixture)]
+        distractors = [f for f in fixture_vocab if str(f) != str(last_visible.fixture)]
+        rng.shuffle(distractors)
+        choices.extend(str(f) for f in distractors[: max(0, cfg.absolute_num_choices - 1)])
+        rng.shuffle(choices)
+        return {
+            "step": 3,
+            "question_class": "oos_step3_fixture",
+            "question": (
+                f"Based on the last visible position of the target {candidate.object_name}, "
+                "which nearby fixture or landmark is closest to it?"
+            ),
+            "choices": choices,
+            "correct_idx": choices.index(str(last_visible.fixture)),
+            "answer_metadata": {
+                "reference_time_sec": last_visible.sampled_time_sec,
+                "correct_fixture": str(last_visible.fixture),
+                "reference_source": last_visible.reference_source,
+            },
+        }
+
     abs_answer = determine_absolute_answer(
         video_id=candidate.video_id,
-        time_sec=reference_time_sec,
+        time_sec=last_visible.sampled_time_sec,
         object_a_assoc_id=candidate.assoc_id,
         annotations_root=cfg.annotations_root,
         num_choices=cfg.absolute_num_choices,
@@ -453,8 +593,9 @@ def _build_step3_fixture(
         "choices": abs_answer.choices,
         "correct_idx": abs_answer.correct_idx,
         "answer_metadata": {
-            "reference_time_sec": reference_time_sec,
+            "reference_time_sec": last_visible.sampled_time_sec,
             "correct_fixture": abs_answer.correct_fixture,
+            "reference_source": last_visible.reference_source,
         },
     }
 
@@ -591,7 +732,8 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
                 continue
 
             common = _build_common_fields(candidate)
-            time_tok = _time_token(common["query_time_in_clip_sec"], input_key="video 1")
+            # time_tok = _time_token(common["query_time_in_clip_sec"], input_key="video 1")
+            time_tok = f"{candidate.query_time_sec:.1f} seconds"
             trajectory_id = f"oos_staged_{horizon_token}_{running_idx}"
             steps: list[dict[str, Any]] = []
 
@@ -621,13 +763,14 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
                 running_idx += 1
                 continue
 
+            last_visible = _fill_last_visible_info_from_motion_track(last_visible, candidate, cfg)
             steps.append(_build_step2_last_visible(candidate, time_tok, last_visible))
 
             try:
                 steps.append(
                     _build_step3_fixture(
                         candidate,
-                        reference_time_sec=last_visible.sampled_time_sec,
+                        last_visible=last_visible,
                         fixture_vocab=fixture_vocab,
                         rng=rng,
                         cfg=cfg,

@@ -20,6 +20,8 @@ class ObjectVisibilityTrack:
 	name: str
 	sampled_times_sec: list[float]
 	visibility_samples: list[bool]
+	projected_pixel_samples: list[list[float] | None]
+	camera_coordinate_samples: list[list[float] | None]
 	spans: list[VisibilitySpan]
 
 
@@ -99,6 +101,8 @@ def generate_in_view_tracks(
 	intermediate_root: str = DEFAULT_INTERMEDIATE_ROOT,
 	start_time_sec: float | None = None,
 	end_time_sec: float | None = None,
+	per_object_pixels: dict[str, list[list[float] | None]] = {},
+	per_object_camera_coords: dict[str, list[list[float] | None]] = {}
 ) -> dict[str, ObjectVisibilityTrack]:
 	"""Generate per-object in-view/out-of-view tracks over uniformly sampled times.
 
@@ -138,10 +142,19 @@ def generate_in_view_tracks(
 			if state.assoc_id not in per_object_name:
 				per_object_name[state.assoc_id] = state.name
 				per_object_samples[state.assoc_id] = []
+				per_object_pixels[state.assoc_id] = []
+				per_object_camera_coords[state.assoc_id] = []   # ← NEW		
 
 			# Track generation only needs binary visibility; non-ok states are treated as out-of-view.
 			is_visible = bool(state.status == "ok" and state.in_view)
 			per_object_samples[state.assoc_id].append(is_visible)
+
+			per_object_pixels[state.assoc_id].append(
+				state.projected_pixel if state.status == "ok" else None
+			)
+			per_object_camera_coords[state.assoc_id].append(
+				state.camera_coordinates if state.status == "ok" else None
+			)
 
 	out: dict[str, ObjectVisibilityTrack] = {}
 	for assoc_id, samples in per_object_samples.items():
@@ -151,6 +164,8 @@ def generate_in_view_tracks(
 			name=per_object_name[assoc_id],
 			sampled_times_sec=sampled_times_sec,
 			visibility_samples=samples,
+			projected_pixel_samples=per_object_pixels[assoc_id],
+			camera_coordinate_samples=per_object_camera_coords[assoc_id],
 			spans=spans,
 		)
 	return out
@@ -164,6 +179,8 @@ def tracks_to_dict(tracks: dict[str, ObjectVisibilityTrack]) -> dict[str, Any]:
 			"name": tr.name,
 			"sampled_times_sec": tr.sampled_times_sec,
 			"visibility_samples": tr.visibility_samples,
+			"projected_pixel_samples": tr.projected_pixel_samples,
+			"camera_coordinate_samples": tr.camera_coordinate_samples,
 			"spans": [
 				{
 					"start_sec": sp.start_sec,
