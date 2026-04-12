@@ -46,11 +46,11 @@ if __package__ in (None, ""):
         read_jsonl,
         write_jsonl,
     )
-    from scripts.visibility_track.in_view_track.in_view_determination import determine_in_view_objects  # noqa: E402
+    from scripts.visibility_track.in_view_track.in_view_determination import VideoCache, determine_in_view_objects  # noqa: E402
 else:
     from .combine import CoarseInterval, POTENTIALLY_VISIBLE_INSIDE_OPEN_FIXTURE, coarse_from_dict
     from .common import DetectionConfig, PipelineConfig, load_config, read_jsonl, write_jsonl
-    from .in_view_track.in_view_determination import determine_in_view_objects
+    from .in_view_track.in_view_determination import VideoCache, determine_in_view_objects
 
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "visibility_track_config.yaml"
@@ -166,6 +166,7 @@ def _sample_detection(
     assoc_id: str,
     object_name: str,
     det_cfg: DetectionConfig,
+    cache: "VideoCache | None" = None,
 ) -> dict:
     states = determine_in_view_objects(
         video_id=video_id,
@@ -173,6 +174,7 @@ def _sample_detection(
         annotations_root=annotations_root,
         fps=video_fps,
         intermediate_root=intermediate_root_name,
+        cache=cache,
     )
     state = next((row for row in states if row.assoc_id == assoc_id), None)
     if (
@@ -239,6 +241,7 @@ def _refine_candidate(
     video_fps: float,
     det_sampling_fps: float,
     det_cfg: DetectionConfig,
+    cache: "VideoCache | None" = None,
 ) -> RefinedInterval:
     times = _detection_times(interval.start_sec, interval.end_sec, det_sampling_fps)
     samples = [
@@ -253,6 +256,7 @@ def _refine_candidate(
             assoc_id=interval.assoc_id,
             object_name=interval.object_name,
             det_cfg=det_cfg,
+            cache=cache,
         )
         for time_sec in times
     ]
@@ -296,6 +300,7 @@ def refine_with_detection(
     target_status = POTENTIALLY_VISIBLE_INSIDE_OPEN_FIXTURE
 
     estimator = _build_estimator(det_cfg)
+    cache = VideoCache.build(video_id, annotations_root, intermediate_root_name)
     output: list[RefinedInterval] = []
 
     detection_intervals = [iv for iv in coarse if iv.status == target_status]
@@ -323,6 +328,7 @@ def refine_with_detection(
                         video_fps=video_fps,
                         det_sampling_fps=det_sampling_fps,
                         det_cfg=det_cfg,
+                        cache=cache,
                     )
                 )
                 pbar.update(len(_detection_times(interval.start_sec, interval.end_sec, det_sampling_fps)))
