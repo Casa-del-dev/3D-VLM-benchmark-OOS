@@ -1,7 +1,4 @@
 """Stage 2: sample per-object in-view state over time."""
-# TODO: Carefully check logic of this script and the in_view_determination script which is used here.
-# TODO: Whenever object is moving and therefore has no annotated fixed position, then this object should be treated as in view as the person is currently manipulating the object and therefore it is most likely in the camera frame and not occluded.
-# TODO: This track should be generated in a similar fashion as the coarse_visibility_track. The reasons for visibility should be 1. within view of camera, 2. outside of view of camera, 3. currently moving (as this means the person is interacting with the object and it is likely visible)
 
 from __future__ import annotations
 
