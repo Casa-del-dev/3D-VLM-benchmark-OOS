@@ -19,7 +19,7 @@ in_view_sampling_fps: 1.0
 
 # How densely we run Grounding DINO inside the surviving
 # "potentially visible" intervals. Object detection is the expensive step.
-object_detection_sampling_fps: 1.0 # 1fps means 5 minute video takes roughly 20 minutes
+object_detection_sampling_fps: 1.0
 
 # HD-EPIC videos are recorded at 30 fps.
 video_fps: 30.0
