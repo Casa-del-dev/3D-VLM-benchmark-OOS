@@ -355,6 +355,28 @@ def determine_in_view_objects(
 			continue
 
 		world_xyz = mask["3d_location"]
+		if world_xyz is None:
+			out.append(
+				ObjectState(
+					assoc_id=assoc_id,
+					name=obj["name"],
+					status="no_valid_mask",
+					selection_mode=mode,
+					track_id=track["track_id"],
+					time_segment=track["time_segment"],
+					mask_id=mask["mask_id"],
+					frame_number=int(mask["frame_number"]),
+					fixture=mask["fixture"],
+					world_coordinates=None,
+					camera_coordinates=None,
+					projected_pixel=None,
+					depth_in_camera=None,
+					in_view=None,
+					next_closest_possible_time=next_time,
+					comment="Mask found but 3d_location is None.",
+				)
+			)
+			continue
 		cam_xyz = transform_point(ctx.T_camera_world, world_xyz)
 		pixel_xy, depth, valid = project_fisheye624(cam_xyz, ctx.projection_params) if ctx.model_name == "CameraModelType.FISHEYE624" else (None, cam_xyz[2], False)
 		in_view = valid and point_in_image(pixel_xy, ctx.image_width, ctx.image_height)
