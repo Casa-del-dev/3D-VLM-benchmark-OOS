@@ -99,6 +99,11 @@ python -m scripts.visibility_track.detection_refinement --video P01-20240203-184
 # Debug overlay video (coloured dots + out-of-view sidebar)
 python -m scripts.visibility_track.overlay_video --video P01-20240203-184045 --fps 1.0
 python -m scripts.visibility_track.overlay_video --participant P01 --fps 1.0
+
+# Static timeline plot (Gantt + time-distribution chart)
+python -m scripts.visibility_track.visualize_track --video P01-20240203-184045
+python -m scripts.visibility_track.visualize_track --participant P01
+python -m scripts.visibility_track.visualize_track --video P01-20240203-184045 --output /tmp/my_plot.png
 ```
 
 ## Config
@@ -125,4 +130,5 @@ outputs/visibility_track/<video_id>/
   visibility_track.jsonl                     (stage 4)
   visibility_track_summary.json              (stage 4)
   visibility_track_overlay.mp4               (overlay_video, optional)
+  visibility_track_plot.png                  (visualize_track, optional)
 ```
