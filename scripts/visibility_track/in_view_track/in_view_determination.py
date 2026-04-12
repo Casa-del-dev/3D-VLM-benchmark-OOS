@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass
 from pathlib import Path
 import json
@@ -230,6 +231,9 @@ class VideoCache:
 	mask_info_video: dict[str, dict[str, Any]]
 	calibration_rgb: dict[str, Any]
 	framewise_rows: list[dict[str, Any]]
+	# Pre-built index for O(log N) frame lookup (populated by build())
+	framewise_sorted_indices: list[int]
+	framewise_index: dict[int, dict[str, Any]]
 
 	@classmethod
 	def build(
@@ -252,12 +256,22 @@ class VideoCache:
 		calibration = load_json(video_dir / "device_calibration.json")
 		framewise_rows = load_jsonl(video_dir / "framewise_info.jsonl")
 
+		# Build sorted index over valid rows for O(log N) closest-frame lookup.
+		valid_rows = [
+			r for r in framewise_rows
+			if r.get("frame_index") is not None and r.get("T_world_device") is not None
+		]
+		framewise_sorted_indices = sorted(int(r["frame_index"]) for r in valid_rows)
+		framewise_index = {int(r["frame_index"]): r for r in valid_rows}
+
 		return cls(
 			video_id=video_id,
 			assoc_objects=assoc_info[video_id],
 			mask_info_video=mask_info[video_id],
 			calibration_rgb=calibration["cameras"]["camera-rgb"],
 			framewise_rows=framewise_rows,
+			framewise_sorted_indices=framewise_sorted_indices,
+			framewise_index=framewise_index,
 		)
 
 
@@ -281,7 +295,16 @@ def load_frame_context(
 	if cache is None:
 		cache = VideoCache.build(video_id, annotations_root, intermediate_root)
 
-	frame_entry = find_closest_frame_entry(cache.framewise_rows, time_sec, fps)
+	# O(log N) lookup using pre-built sorted index.
+	target_frame = int(round(time_sec * fps))
+	indices = cache.framewise_sorted_indices
+	if not indices:
+		raise ValueError("No valid frame entries with T_world_device.")
+	pos = bisect.bisect_left(indices, target_frame)
+	best = indices[min(pos, len(indices) - 1)]
+	if pos > 0 and abs(indices[pos - 1] - target_frame) < abs(best - target_frame):
+		best = indices[pos - 1]
+	frame_entry = cache.framewise_index[best]
 	rgb = cache.calibration_rgb
 	T_device_camera_raw = rgb["T_device_camera"]
 	T_device_camera = to_homogeneous_4x4(T_device_camera_raw) if len(T_device_camera_raw) == 3 else T_device_camera_raw
