@@ -11,11 +11,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, List
 
+from tqdm import tqdm
+
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
     from scripts.visibility_track.common import PipelineConfig, load_config, write_jsonl  # noqa: E402
     from scripts.visibility_track.in_view_track.in_view_determination import (  # noqa: E402
         DEFAULT_INTERMEDIATE_ROOT,
+        VideoCache,
         determine_in_view_objects,
         load_jsonl,
     )
@@ -23,6 +26,7 @@ else:
     from ..common import PipelineConfig, load_config, write_jsonl
     from .in_view_determination import (
         DEFAULT_INTERMEDIATE_ROOT,
+        VideoCache,
         determine_in_view_objects,
         load_jsonl,
     )
@@ -134,16 +138,20 @@ def generate_in_view_tracks(
     if not times:
         return {}
 
+    # Build cache once per video — avoids re-reading large JSON files each step.
+    video_cache = VideoCache.build(video_id, annotations_root, intermediate_root)
+
     names: dict[str, str] = {}
     samples_by_object: dict[str, list[ObjectSample]] = {}
 
-    for time_sec in times:
+    for time_sec in tqdm(times, desc=video_id, unit="s", leave=False):
         states = determine_in_view_objects(
             video_id=video_id,
             time_sec=time_sec,
             annotations_root=annotations_root,
             fps=fps_for_frame_lookup,
             intermediate_root=intermediate_root,
+            cache=video_cache,
         )
         for state in states:
             names.setdefault(state.assoc_id, state.name)

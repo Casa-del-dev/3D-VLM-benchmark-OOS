@@ -217,35 +217,72 @@ def find_closest_frame_entry(framewise_rows: list[dict[str, Any]], time_sec: flo
 	return min(candidates, key=lambda r: abs(int(r["frame_index"]) - target_frame))
 
 
+@dataclass
+class VideoCache:
+	"""Per-video data loaded once and reused across all time steps.
+
+	Holds the large shared JSON blobs (assoc_info, mask_info) and the
+	per-video calibration + framewise rows so they are not re-read from
+	disk on every call to load_frame_context.
+	"""
+	video_id: str
+	assoc_objects: dict[str, dict[str, Any]]
+	mask_info_video: dict[str, dict[str, Any]]
+	calibration_rgb: dict[str, Any]
+	framewise_rows: list[dict[str, Any]]
+
+	@classmethod
+	def build(
+		cls,
+		video_id: str,
+		annotations_root: str | Path,
+		intermediate_root: str = DEFAULT_INTERMEDIATE_ROOT,
+	) -> "VideoCache":
+		annotations_root = Path(annotations_root)
+		participant_id = video_id.split("-")[0]
+
+		assoc_info = load_json(annotations_root / "scene-and-object-movements" / "assoc_info.json")
+		mask_info = load_json(annotations_root / "scene-and-object-movements" / "mask_info.json")
+		if video_id not in assoc_info:
+			raise KeyError(f"Video {video_id} not found in assoc_info.json")
+		if video_id not in mask_info:
+			raise KeyError(f"Video {video_id} not found in mask_info.json")
+
+		video_dir = annotations_root / intermediate_root / participant_id / video_id
+		calibration = load_json(video_dir / "device_calibration.json")
+		framewise_rows = load_jsonl(video_dir / "framewise_info.jsonl")
+
+		return cls(
+			video_id=video_id,
+			assoc_objects=assoc_info[video_id],
+			mask_info_video=mask_info[video_id],
+			calibration_rgb=calibration["cameras"]["camera-rgb"],
+			framewise_rows=framewise_rows,
+		)
+
+
 def load_frame_context(
 	video_id: str,
 	time_sec: float,
 	annotations_root: str | Path,
 	fps: float,
 	intermediate_root: str = DEFAULT_INTERMEDIATE_ROOT,
+	cache: "VideoCache | None" = None,
 ) -> FrameContext:
 	"""Load and assemble all frame-level inputs needed for visibility checks.
 
 	Inputs: video id, query time in seconds, annotation root path, fps, intermediate-data folder name.
 	Computes: nearest frame entry, camera extrinsics/intrinsics, and T_camera_world transform.
 	Outputs: FrameContext with calibration, frame index, and object/mask dictionaries for the video.
+
+	Pass a pre-built VideoCache to avoid re-reading the large JSON files on
+	every call (critical when processing many time steps for the same video).
 	"""
-	annotations_root = Path(annotations_root)
-	participant_id = video_id.split("-")[0]
+	if cache is None:
+		cache = VideoCache.build(video_id, annotations_root, intermediate_root)
 
-	assoc_info = load_json(annotations_root / "scene-and-object-movements" / "assoc_info.json")
-	mask_info = load_json(annotations_root / "scene-and-object-movements" / "mask_info.json")
-	video_dir = annotations_root / intermediate_root / participant_id / video_id
-	calibration = load_json(video_dir / "device_calibration.json")
-	framewise_rows = load_jsonl(video_dir / "framewise_info.jsonl")
-
-	if video_id not in assoc_info:
-		raise KeyError(f"Video {video_id} not found in assoc_info.json")
-	if video_id not in mask_info:
-		raise KeyError(f"Video {video_id} not found in mask_info.json")
-
-	frame_entry = find_closest_frame_entry(framewise_rows, time_sec, fps)
-	rgb = calibration["cameras"]["camera-rgb"]
+	frame_entry = find_closest_frame_entry(cache.framewise_rows, time_sec, fps)
+	rgb = cache.calibration_rgb
 	T_device_camera_raw = rgb["T_device_camera"]
 	T_device_camera = to_homogeneous_4x4(T_device_camera_raw) if len(T_device_camera_raw) == 3 else T_device_camera_raw
 	T_world_device_raw = frame_entry["T_world_device"]
@@ -260,8 +297,8 @@ def load_frame_context(
 		model_name=rgb["model_name"],
 		projection_params=[float(v) for v in rgb["projection_params"]],
 		T_camera_world=T_camera_world,
-		assoc_objects=assoc_info[video_id],
-		mask_info_video=mask_info[video_id],
+		assoc_objects=cache.assoc_objects,
+		mask_info_video=cache.mask_info_video,
 	)
 
 
@@ -271,15 +308,18 @@ def determine_in_view_objects(
 	annotations_root: str | Path,
 	fps: float = 30.0,
 	intermediate_root: str = DEFAULT_INTERMEDIATE_ROOT,
+	cache: "VideoCache | None" = None,
 ) -> list[ObjectState]:
 	"""Estimate in-view status for all objects at a given query time.
 
 	Inputs: video id, query time, annotation root, fps, and intermediate-data folder name.
 	Computes: track selection around time t, mask sampling, camera projection, and in/out-of-view decision.
 	Outputs: list of ObjectState entries (one per object), including failure/status cases.
+
+	Pass a pre-built VideoCache to avoid re-reading large JSON files per call.
 	"""
 	# Reuses the same track-selection policy as preprocessing scripts.
-	ctx = load_frame_context(video_id, time_sec, annotations_root, fps, intermediate_root)
+	ctx = load_frame_context(video_id, time_sec, annotations_root, fps, intermediate_root, cache=cache)
 	out: list[ObjectState] = []
 
 	for assoc_id, obj in ctx.assoc_objects.items():
