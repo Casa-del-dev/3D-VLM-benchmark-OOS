@@ -35,4 +35,4 @@ output_json: ../../../outputs/staged_questions_debug/staged_oos_trajectories.jso
 
 #in_view track
 visibility_tracks_json:
-  P04-20240413-142619: ../../../data/in_view_tracks/inview_track_P04-20240413-142619_2fps.json
+  P04-20240413-142619: ../../../data/in_view_tracks/inview_track_P04-20240413-142619.json
