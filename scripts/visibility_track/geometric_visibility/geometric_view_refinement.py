@@ -33,6 +33,7 @@ if __package__ in (None, ""):
     from scripts.visibility_track.common import PipelineConfig, load_config, read_jsonl, write_jsonl  # noqa: E402
     from scripts.visibility_track.geometric_visibility.mesh_scene import RayOcclusionChecker  # noqa: E402
     from scripts.visibility_track.in_view_track.in_view_determination import (  # noqa: E402
+        VideoCache,
         load_frame_context,
         invert_rigid_4x4,
     )
@@ -44,7 +45,7 @@ if __package__ in (None, ""):
 else:
     from ..common import PipelineConfig, load_config, read_jsonl, write_jsonl
     from .mesh_scene import RayOcclusionChecker
-    from ..in_view_track.in_view_determination import load_frame_context, invert_rigid_4x4
+    from ..in_view_track.in_view_determination import VideoCache, load_frame_context, invert_rigid_4x4
     from ..in_view_track.in_view_track_generator import (
         ObjectInViewTrack,
         track_from_dict,
@@ -73,6 +74,7 @@ def refine_tracks_geometric(
     video_fps: float,
     intermediate_root: str,
     occlusion_tolerance: float = 0.05,
+    cache: VideoCache | None = None,
 ) -> dict[str, ObjectInViewTrack]:
     """Add ``geometrically_occluded`` flags to every in-view sample.
 
@@ -82,7 +84,11 @@ def refine_tracks_geometric(
     ``geometrically_occluded = True``.
 
     Camera positions are loaded per unique frame index to avoid redundant I/O.
+    Pass a pre-built VideoCache to avoid re-reading large JSON files per call.
     """
+    if cache is None:
+        cache = VideoCache.build(video_id, annotations_root, intermediate_root)
+
     # Collect unique sample times across all tracks so each query-time camera
     # pose is loaded once. Do not key by sample.frame_index: that index comes
     # from the selected object mask frame and may be stale relative to query
@@ -103,6 +109,7 @@ def refine_tracks_geometric(
                 annotations_root=annotations_root,
                 fps=video_fps,
                 intermediate_root=intermediate_root,
+                cache=cache,
             )
             camera_positions[time_sec] = _camera_world_position(ctx.T_camera_world)
         except Exception:
@@ -167,6 +174,7 @@ def run_stage(cfg: PipelineConfig, video_ids: List[str]) -> None:
             if not in_view_path.exists():
                 raise FileNotFoundError(f"Missing {in_view_path}. Run stage 2 first.")
 
+            cache = VideoCache.build(video_id, cfg.annotations_root, str(cfg.intermediate_data_root))
             tracks = {row["assoc_id"]: track_from_dict(row) for row in read_jsonl(in_view_path)}
             tracks = refine_tracks_geometric(
                 video_id=video_id,
@@ -176,6 +184,7 @@ def run_stage(cfg: PipelineConfig, video_ids: List[str]) -> None:
                 video_fps=cfg.video_fps,
                 intermediate_root=str(cfg.intermediate_data_root),
                 occlusion_tolerance=cfg.geometric_occlusion_tolerance,
+                cache=cache,
             )
 
             out_path = out_dir / "geometric_refined_in_view_tracks.jsonl"
