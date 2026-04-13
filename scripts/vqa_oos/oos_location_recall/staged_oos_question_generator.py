@@ -716,7 +716,7 @@ def _build_step5_camera_quadrant(
         "step": 5,
         "question_class": "oos_step5_camera_quadrant",
         "question": (
-            f"The {candidate.object_name} taht was last moved was seen earlier. From where you are now at {time_tok}, "
+            f"The {candidate.object_name} that was last moved was seen earlier. From where you are now at {time_tok}, "
             f"in which direction is the target {candidate.object_name}?"
         ),
         "choices": CAMERA_QUADRANT_CHOICES,
