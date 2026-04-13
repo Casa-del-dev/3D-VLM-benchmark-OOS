@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import key_frame_generator as kfg
-from abs_answer_determ import build_fixture_vocabulary, determine_absolute_answer
+from abs_answer_determ import build_fixture_vocabulary, determine_absolute_answer, semantic_fixture_name
 from in_view_determination import (
     DEFAULT_INTERMEDIATE_ROOT,
     determine_in_view_objects,
@@ -553,11 +553,28 @@ def _build_step3_fixture(
     cfg: BenchmarkConfig,
 ) -> dict[str, Any]:
     if last_visible.fixture is not None:
-        choices = [str(last_visible.fixture)]
-        distractors = [f for f in fixture_vocab if str(f) != str(last_visible.fixture)]
-        rng.shuffle(distractors)
-        choices.extend(str(f) for f in distractors[: max(0, cfg.absolute_num_choices - 1)])
+        correct_fixture = semantic_fixture_name(last_visible.fixture)
+        if not correct_fixture:
+            raise ValueError(f"Could not normalize fixture {last_visible.fixture!r}")
+
+        # semantic, unique fixture types only
+        distractors = sorted({
+            str(f)
+            for f in fixture_vocab
+            if str(f) and str(f) != correct_fixture
+        })
+
+        if len(distractors) < cfg.absolute_num_choices - 1:
+            raise ValueError(
+                f"Not enough semantic fixture types for step 3: "
+                f"need {cfg.absolute_num_choices}, "
+                f"but only found {len(distractors) + 1} including the correct answer."
+            )
+
+        chosen_distractors = rng.sample(distractors, k=cfg.absolute_num_choices - 1)
+        choices = [correct_fixture] + chosen_distractors
         rng.shuffle(choices)
+
         return {
             "step": 3,
             "question_class": "oos_step3_fixture",
@@ -566,10 +583,11 @@ def _build_step3_fixture(
                 "which nearby fixture or landmark is closest to it?"
             ),
             "choices": choices,
-            "correct_idx": choices.index(str(last_visible.fixture)),
+            "correct_idx": choices.index(correct_fixture),
             "answer_metadata": {
                 "reference_time_sec": last_visible.sampled_time_sec,
-                "correct_fixture": str(last_visible.fixture),
+                "correct_fixture": correct_fixture,
+                "raw_correct_fixture": str(last_visible.fixture),
                 "reference_source": last_visible.reference_source,
             },
         }

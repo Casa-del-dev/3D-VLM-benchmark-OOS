@@ -20,6 +20,33 @@ class AbsoluteAnswer:
 	choices: list[str]
 	correct_idx: int
 
+def semantic_fixture_name(fixture_name_raw: str | None) -> str | None:
+	"""Map raw fixture instance name to a semantic/base fixture type.
+
+	Examples:
+		"P04_counter.004" -> "counter"
+		"P04_drawer.002"  -> "drawer"
+		"mid-air"         -> "mid-air"
+	"""
+	if not isinstance(fixture_name_raw, str):
+		return None
+
+	name = fixture_name_raw.strip()
+	if not name:
+		return None
+
+	# preserve special tokens as-is
+	if name in {"mid-air"}:
+		return name.lower()
+
+	# drop instance suffix like ".004"
+	name = name.split(".")[0]
+
+	# drop scene prefix like "P04_"
+	if "_" in name:
+		name = name.split("_", 1)[1]
+
+	return name.lower()
 
 def build_fixture_vocabulary(
 	annotations_root: str | Path,
@@ -38,7 +65,8 @@ def build_fixture_vocabulary(
 		if selected_video_ids is not None and video_id not in selected_video_ids:
 			continue
 		for entry in masks.values():
-			fixture = entry.get("fixture")
+			#fixture = entry.get("fixture")
+			fixture = semantic_fixture_name(entry.get("fixture"))
 			if fixture:
 				vocab.add(str(fixture))
 	return sorted(vocab)
@@ -96,15 +124,28 @@ def build_absolute_choices(
 		raise ValueError("num_choices must be >= 2")
 
 	rng = rng or random.Random()
-	vocab_set = {str(x) for x in fixture_vocabulary if str(x)}
-	vocab_set.discard(correct_fixture)
+	# vocab_set = {str(x) for x in fixture_vocabulary if str(x)}
+	# vocab_set.discard(correct_fixture)
+	correct_semantic = semantic_fixture_name(correct_fixture)
+
+	vocab_set = {
+		semantic_fixture_name(x)
+		for x in fixture_vocabulary
+		if semantic_fixture_name(x)
+	}
+	vocab_set.discard(correct_semantic)
 	distractors = sorted(vocab_set)
 
+	# if len(distractors) < num_choices - 1:
+	# 	raise ValueError(
+	# 		f"Not enough distractors: need {num_choices - 1}, found {len(distractors)}"
+	# 	)
 	if len(distractors) < num_choices - 1:
 		raise ValueError(
-			f"Not enough distractors: need {num_choices - 1}, found {len(distractors)}"
+			f"Not enough semantic fixture types: need {num_choices}, "
+			f"but only {len(distractors) + 1} available (including correct)."
 		)
-
+	
 	chosen_distractors = rng.sample(distractors, k=num_choices - 1)
 	choices = [correct_fixture] + chosen_distractors
 	rng.shuffle(choices)
@@ -123,12 +164,19 @@ def determine_absolute_answer(
 	rng: random.Random | None = None,
 ) -> AbsoluteAnswer:
 	"""Resolve absolute fixture answer for one keyframe/object pair."""
-	correct_fixture = resolve_fixture_for_object_at_time(
+	# correct_fixture = resolve_fixture_for_object_at_time(
+	# 	video_id=video_id,
+	# 	time_sec=time_sec,
+	# 	object_a_assoc_id=object_a_assoc_id,
+	# 	annotations_root=annotations_root,
+	# )
+	raw_correct_fixture = resolve_fixture_for_object_at_time(
 		video_id=video_id,
 		time_sec=time_sec,
 		object_a_assoc_id=object_a_assoc_id,
 		annotations_root=annotations_root,
 	)
+	correct_fixture = semantic_fixture_name(raw_correct_fixture)
 
 	if fixture_vocabulary is None:
 		fixture_vocabulary = build_fixture_vocabulary(
