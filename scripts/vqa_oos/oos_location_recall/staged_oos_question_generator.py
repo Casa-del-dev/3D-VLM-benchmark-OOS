@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
+import math
 
 import key_frame_generator as kfg
 from abs_answer_determ import build_fixture_vocabulary, determine_absolute_answer, semantic_fixture_name
@@ -422,7 +423,61 @@ def _classify_camera_pose_change(
         return 3, yaw_delta
     return (1, yaw_delta) if yaw_delta > 0.0 else (2, yaw_delta)
 
+CAMERA_QUADRANT_CHOICES = [
+    "Front-left",
+    "Front-right",
+    "Back-left",
+    "Back-right",
+]
 
+def classify_camera_quadrant_robust(
+    camera_coordinates,
+    *,
+    center_margin=0.05,      # ignore near x=0
+    depth_margin=0.05,       # ignore near z=0
+    angle_margin_deg=5.0     # ignore near diagonal boundaries
+):
+    """
+    Returns:
+        (correct_idx, label, metadata)
+        OR (None, None, metadata) if ambiguous
+    """
+
+    if camera_coordinates is None or len(camera_coordinates) < 3:
+        return None, None, {"reason": "no_coordinates"}
+
+    x, y, z = [float(v) for v in camera_coordinates[:3]]
+
+    # --- 1) Reject near camera plane (front vs back unstable)
+    if abs(z) < depth_margin:
+        return None, None, {"reason": "near_z_boundary", "x": x, "z": z}
+
+    # --- 2) Reject near center line (left vs right unstable)
+    if abs(x) < center_margin:
+        return None, None, {"reason": "near_x_boundary", "x": x, "z": z}
+
+    # --- 3) Optional: reject near diagonal boundaries
+    yaw_deg = math.degrees(math.atan2(x, z))  # angle from forward
+
+    # diagonal boundaries at ±90° (front/back split already handled by z)
+    if abs(abs(yaw_deg) - 90.0) < angle_margin_deg:
+        return None, None, {
+            "reason": "near_diagonal_boundary",
+            "yaw_deg": yaw_deg,
+        }
+
+    # --- 4) Final quadrant classification
+    if z > 0:
+        if x < 0:
+            return 0, "Front-left", {"x": x, "z": z}
+        else:
+            return 1, "Front-right", {"x": x, "z": z}
+    else:
+        if x < 0:
+            return 2, "Back-left", {"x": x, "z": z}
+        else:
+            return 3, "Back-right", {"x": x, "z": z}
+        
 def _parse_visibility_tracks_json(
     raw_value: Any,
     root: Path,
@@ -503,8 +558,7 @@ def _build_step1_visibility(candidate: KeyFrameCandidate, object_state: Any, tim
         "step": 1,
         "question_class": "oos_step1_visibility",
         "question": (
-            f"At the current time {time_tok}, is the target {candidate.object_name} "
-            "(the same object instance queried here) visible in the current frame?"
+            f"At the current time {time_tok}, is the target {candidate.object_name} that was moved earlier visible in the current frame?"
         ),
         "choices": ["Yes", "No"],
         "correct_idx": 0 if is_visible else 1,
@@ -524,8 +578,7 @@ def _build_step2_last_visible(candidate: KeyFrameCandidate, time_tok: str, last_
         "step": 2,
         "question_class": "oos_step2_last_visible",
         "question": (
-            f"At the current time {time_tok}, the target {candidate.object_name} is not visible. "
-            "When was it last visible, and where was it located in the image?"
+            f"At the current time {time_tok}, the target {candidate.object_name} that was moved earlier is not visible. When was it last visible, and where was it located in the image?"
         ),
         "choices": [],
         "correct_idx": None,
@@ -546,6 +599,7 @@ def _build_step2_last_visible(candidate: KeyFrameCandidate, time_tok: str, last_
 
 def _build_step3_fixture(
     candidate: KeyFrameCandidate,
+    time_tok: str,
     *,
     last_visible: LastVisibleInfo,
     fixture_vocab: list[str],
@@ -557,7 +611,6 @@ def _build_step3_fixture(
         if not correct_fixture:
             raise ValueError(f"Could not normalize fixture {last_visible.fixture!r}")
 
-        # semantic, unique fixture types only
         distractors = sorted({
             str(f)
             for f in fixture_vocab
@@ -579,8 +632,7 @@ def _build_step3_fixture(
             "step": 3,
             "question_class": "oos_step3_fixture",
             "question": (
-                f"Based on the last visible position of the target {candidate.object_name}, "
-                "which nearby fixture or landmark is closest to it?"
+                f"At the current time {time_tok}, based on the last placement of the target {candidate.object_name} that was moved earlier, which nearby fixture or landmark is closest to it?"
             ),
             "choices": choices,
             "correct_idx": choices.index(correct_fixture),
@@ -601,12 +653,12 @@ def _build_step3_fixture(
         fixture_vocabulary=fixture_vocab,
         rng=rng,
     )
+
     return {
         "step": 3,
         "question_class": "oos_step3_fixture",
         "question": (
-            f"Based on the last visible position of the target {candidate.object_name}, "
-            "which nearby fixture or landmark is closest to it?"
+            f"At the current time {time_tok}, based on the last placement of the target {candidate.object_name} that was moved earlier, which nearby fixture or landmark is closest to it?"
         ),
         "choices": abs_answer.choices,
         "correct_idx": abs_answer.correct_idx,
@@ -636,8 +688,7 @@ def _build_step4_camera_pose_change(
         "step": 4,
         "question_class": "oos_step4_camera_pose_change",
         "question": (
-            f"At the current time {time_tok}, compared with when the target {candidate.object_name} was last visible, "
-            "what is the net change in the camera's viewing direction?"
+            f"At the current time {time_tok}, compared with when the target {candidate.object_name} was last visible, how has the camera's viewing direction changed?"
         ),
         "choices": CAMERA_POSE_CHANGE_CHOICES,
         "correct_idx": pose_idx,
@@ -649,6 +700,34 @@ def _build_step4_camera_pose_change(
         },
     }
 
+def _build_step5_camera_quadrant(
+    candidate,
+    time_tok,
+    camera_coordinates,
+):
+    correct_idx, label, debug = classify_camera_quadrant_robust(
+        camera_coordinates,
+        center_margin=0.05,
+        depth_margin=0.05,
+        angle_margin_deg=5.0,
+    )
+
+    return {
+        "step": 5,
+        "question_class": "oos_step5_camera_quadrant",
+        "question": (
+            f"The {candidate.object_name} taht was last moved was seen earlier. From where you are now at {time_tok}, "
+            f"in which direction is the target {candidate.object_name}?"
+        ),
+        "choices": CAMERA_QUADRANT_CHOICES,
+        "correct_idx": correct_idx,
+        "answer_metadata": {
+            "camera_coordinates": camera_coordinates,
+            "label": label,
+            "debug": debug,
+        },
+        "skipped": correct_idx is None,
+    }
 
 def _finalize_trajectory(trajectory_id: str, common: dict[str, Any], steps: list[dict[str, Any]], *, stop_reason: str) -> tuple[str, dict[str, Any]]:
     return trajectory_id, {
@@ -788,6 +867,7 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
                 steps.append(
                     _build_step3_fixture(
                         candidate,
+                        time_tok,
                         last_visible=last_visible,
                         fixture_vocab=fixture_vocab,
                         rng=rng,
@@ -833,7 +913,35 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
                         "skipped": True,
                     }
                 )
-
+            try:
+                step5_camera_coordinates = _state_attr(object_state, "camera_coordinates")
+                steps.append(
+                    _build_step5_camera_quadrant(
+                        candidate,
+                        time_tok,
+                        step5_camera_coordinates,
+                    )
+                )
+            except Exception as exc:
+                steps.append(
+                    {
+                        "step": 5,
+                        "question_class": "oos_step5_camera_quadrant",
+                        "question": (
+                            f"The target {candidate.object_name} which was moved earlier, was seen previously. "
+                            f"From your current viewpoint at {time_tok}, "
+                            f"in which direction is the target {candidate.object_name} located?"
+                        ),
+                        "choices": CAMERA_QUADRANT_CHOICES,
+                        "correct_idx": None,
+                        "answer_metadata": {
+                            "query_time_sec": candidate.query_time_sec,
+                            "camera_coordinates": _state_attr(object_state, "camera_coordinates"),
+                            "error": repr(exc),
+                        },
+                        "skipped": True,
+                    }
+                )
             key, payload = _finalize_trajectory(
                 trajectory_id,
                 common,
