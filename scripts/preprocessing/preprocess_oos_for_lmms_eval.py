@@ -182,7 +182,14 @@ def make_multiturn_messages_from_gold(
         })
 
     for step in steps:
-        if step.get("step") in IGNORED_STEP_NUMBERS:
+        step_num = step.get("step")
+
+        # Skip globally ignored steps (e.g., step 4)
+        if step_num in IGNORED_STEP_NUMBERS:
+            continue
+
+        # Additionally skip step 5 ONLY in gold history
+        if step_num == 5:
             continue
 
         messages.append({
