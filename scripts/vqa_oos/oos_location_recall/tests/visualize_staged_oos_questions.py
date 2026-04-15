@@ -142,11 +142,13 @@ def build_text_panel(trajectory_id: str, traj: Dict[str, Any]) -> str:
     step2 = get_step(traj, 2)
     step3 = get_step(traj, 3)
     step4 = get_step(traj, 4)
+    step5 = get_step(traj, 5)   # NEW
 
     s1_meta = (step1 or {}).get("answer_metadata", {})
     s2_meta = (step2 or {}).get("answer_metadata", {})
     s3_meta = (step3 or {}).get("answer_metadata", {})
     s4_meta = (step4 or {}).get("answer_metadata", {})
+    s5_meta = (step5 or {}).get("answer_metadata", {})   # NEW
 
     lines = [
         f"Trajectory: {trajectory_id}",
@@ -178,9 +180,54 @@ def build_text_panel(trajectory_id: str, traj: Dict[str, Any]) -> str:
         f"  expected answer: {expected_camera_motion_label(step4)}",
         f"  yaw_delta_deg: {s4_meta.get('yaw_delta_deg', 'N/A')}",
         f"  thresholds: no_change<={s4_meta.get('no_change_threshold_deg', 'N/A')}  rotated_back>={s4_meta.get('rotated_back_threshold_deg', 'N/A')}",
+        "",
+        "Step 5: camera quadrant",   # NEW
+        f"  chosen label: {idx_to_choice((step5 or {}).get('choices', []), (step5 or {}).get('correct_idx'))}",
+        f"  metadata label: {s5_meta.get('label', 'N/A')}",
+        f"  camera_coordinates: {s5_meta.get('camera_coordinates', 'N/A')}",
+        f"  skipped: {(step5 or {}).get('skipped', False)}",
+        f"  debug: {s5_meta.get('debug', {})}",
     ]
     return wrap_lines(lines)
 
+
+def draw_quadrant_overlay(ax, label: Optional[str]) -> None:
+    if not label:
+        return
+
+    ax.text(
+        0.98, 0.98,
+        f"Step 5: {label}",
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=10,
+        bbox=dict(facecolor="white", alpha=0.85, edgecolor="black"),
+    )
+
+    # simple 2x2 direction box
+    box_x, box_y, box_w, box_h = 0.72, 0.72, 0.22, 0.22
+    ax.plot([box_x + box_w/2, box_x + box_w/2], [box_y, box_y + box_h],
+            transform=ax.transAxes, color="white", linewidth=1.5)
+    ax.plot([box_x, box_x + box_w], [box_y + box_h/2, box_y + box_h/2],
+            transform=ax.transAxes, color="white", linewidth=1.5)
+
+    quadrant_centers = {
+        "Front-left":  (box_x + 0.25 * box_w, box_y + 0.75 * box_h),
+        "Front-right": (box_x + 0.75 * box_w, box_y + 0.75 * box_h),
+        "Back-left":   (box_x + 0.25 * box_w, box_y + 0.25 * box_h),
+        "Back-right":  (box_x + 0.75 * box_w, box_y + 0.25 * box_h),
+    }
+
+    for name, (cx, cy) in quadrant_centers.items():
+        prefix = "● " if name == label else ""
+        ax.text(
+            cx, cy, prefix + name.replace("-", "\n"),
+            transform=ax.transAxes,
+            ha="center", va="center",
+            fontsize=8,
+            bbox=dict(facecolor="white", alpha=0.65, edgecolor="black"),
+        )
 
 def visualize_one(
     trajectory_id: str,
@@ -195,8 +242,10 @@ def visualize_one(
 
     step1 = get_step(traj, 1)
     step2 = get_step(traj, 2)
+    step5 = get_step(traj, 5)
     step1_meta = (step1 or {}).get("answer_metadata", {})
     step2_meta = (step2 or {}).get("answer_metadata", {})
+    step5_meta = (step5 or {}).get("answer_metadata", {})
 
     query_time = float(traj["query_time_sec"])
     last_visible_time = step2_meta.get("sampled_last_visible_time_sec")
@@ -224,7 +273,7 @@ def visualize_one(
     else:
         lh, lw = qh, qw
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig, axes = plt.subplots(1, 3, figsize=(20, 6.5))
 
     if last_frame is not None:
         axes[0].imshow(last_frame)
@@ -238,6 +287,7 @@ def visualize_one(
     axes[1].imshow(query_frame)
     axes[1].set_title(f"Query frame\n t={query_time}s | frame={query_idx} | fps≈{fps_used:.3f}")
     draw_marker(axes[1], step1_meta.get("projected_pixel"), qw, qh, "deepskyblue", "query projected")
+    draw_quadrant_overlay(axes[1], step5_meta.get("label"))
     axes[1].axis("off")
 
     axes[2].axis("off")
@@ -291,8 +341,7 @@ def choose_trajectories(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Visualize staged OOS questions to inspect visibility, last-visible position, fixture label, and camera motion."
-    )
+        description="Visualize staged OOS questions to inspect visibility, last-visible position, fixture label, camera motion, and step-5 direction quadrant."    )
     parser.add_argument("--questions", type=Path, required=True, help="Path to staged_oos_trajectories.json")
     parser.add_argument(
         "--video",

@@ -47,6 +47,8 @@ class BenchmarkConfig:
     output_json: Path | None = None
     visibility_tracks_json_by_video: dict[str, Path] | None = None
     pre_context_sec: float = 2.0
+    raw_video_width: float | None = None
+    raw_video_height: float | None = None
 
 
 @dataclass(frozen=True)
@@ -532,8 +534,30 @@ def _load_config(path: Path) -> BenchmarkConfig:
             video_ids=video_ids,
         ),
         pre_context_sec=float(raw.get("pre_context_sec", 2.0)),
+        raw_video_width=float(raw["raw_video_width"]) if raw.get("raw_video_width") is not None else None,
+        raw_video_height=float(raw["raw_video_height"]) if raw.get("raw_video_height") is not None else None,
+
     )
 
+def _normalize_projected_pixel(
+    projected_pixel: list[float] | None,
+    raw_video_width: float | None,
+    raw_video_height: float | None,
+) -> list[float] | None:
+    if (
+        projected_pixel is None
+        or raw_video_width is None
+        or raw_video_height is None
+        or raw_video_width == 0
+        or raw_video_height == 0
+        or len(projected_pixel) < 2
+    ):
+        return None
+
+    return [
+        float(projected_pixel[0]) / float(raw_video_width),
+        float(projected_pixel[1]) / float(raw_video_height),
+    ]
 
 def _build_common_fields(candidate: KeyFrameCandidate) -> dict[str, Any]:
     query_time_in_clip_sec = candidate.query_time_sec - candidate.clip_start_time_sec
@@ -573,7 +597,22 @@ def _build_step1_visibility(candidate: KeyFrameCandidate, object_state: Any, tim
     }
 
 
-def _build_step2_last_visible(candidate: KeyFrameCandidate, time_tok: str, last_visible: LastVisibleInfo) -> dict[str, Any]:
+def _build_step2_last_visible(
+    candidate: KeyFrameCandidate,
+    time_tok: str,
+    last_visible: LastVisibleInfo,
+    cfg: BenchmarkConfig,
+) -> dict[str, Any]:
+    normalized_projected_pixel = _normalize_projected_pixel(
+        last_visible.projected_pixel,
+        cfg.raw_video_width,
+        cfg.raw_video_height,
+    )
+    last_visible_time_token = _time_token(
+    last_visible.sampled_time_sec,
+    input_key="video 1",
+    )
+
     return {
         "step": 2,
         "question_class": "oos_step2_last_visible",
@@ -585,7 +624,9 @@ def _build_step2_last_visible(candidate: KeyFrameCandidate, time_tok: str, last_
         "answer_metadata": {
             "sampled_last_visible_time_sec": last_visible.sampled_time_sec,
             "sampled_last_visible_time_in_clip_sec": last_visible.sampled_time_sec - candidate.clip_start_time_sec,
+            "sampled_last_visible_time_token": last_visible_time_token,
             "projected_pixel": last_visible.projected_pixel,
+            "normalized_projected_pixel": normalized_projected_pixel,
             "camera_coordinates": last_visible.camera_coordinates,
             "frame_index": last_visible.frame_index,
             "status": last_visible.status,
@@ -830,7 +871,7 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
 
             common = _build_common_fields(candidate)
             # time_tok = _time_token(common["query_time_in_clip_sec"], input_key="video 1")
-            time_tok = f"{candidate.query_time_sec:.1f} seconds"
+            time_tok = _time_token(candidate.query_time_sec, input_key="video 1")
             trajectory_id = f"oos_staged_{horizon_token}_{running_idx}"
             steps: list[dict[str, Any]] = []
 
@@ -861,7 +902,7 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
                 continue
 
             last_visible = _fill_last_visible_info_from_motion_track(last_visible, candidate, cfg)
-            steps.append(_build_step2_last_visible(candidate, time_tok, last_visible))
+            steps.append(_build_step2_last_visible(candidate, time_tok, last_visible, cfg))
 
             try:
                 steps.append(
