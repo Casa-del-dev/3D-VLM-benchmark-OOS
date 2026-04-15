@@ -637,6 +637,14 @@ def _build_step2_last_visible(
         },
     }
 
+def _is_invalid_step3_fixture_label(label: str | None) -> bool:
+    if label is None:
+        return True
+    normalized = str(label).strip().lower()
+    return normalized in {
+        "",
+        "mid-air",
+    }
 
 def _build_step3_fixture(
     candidate: KeyFrameCandidate,
@@ -651,11 +659,13 @@ def _build_step3_fixture(
         correct_fixture = semantic_fixture_name(last_visible.fixture)
         if not correct_fixture:
             raise ValueError(f"Could not normalize fixture {last_visible.fixture!r}")
+        if _is_invalid_step3_fixture_label(correct_fixture):
+            raise ValueError(f"Fixture label {last_visible.fixture!r} normalized to {correct_fixture!r} is not valid for step 3 question.")
 
         distractors = sorted({
             str(f)
             for f in fixture_vocab
-            if str(f) and str(f) != correct_fixture
+            if str(f) and str(f) != correct_fixture and not _is_invalid_step3_fixture_label(str(f))
         })
 
         if len(distractors) < cfg.absolute_num_choices - 1:
@@ -694,6 +704,8 @@ def _build_step3_fixture(
         fixture_vocabulary=fixture_vocab,
         rng=rng,
     )
+    if _is_invalid_step3_fixture_label(abs_answer.correct_fixture):
+        raise ValueError(f"Invalid step 3 fixture answer: {abs_answer.correct_fixture!r}")    
 
     return {
         "step": 3,
@@ -838,6 +850,9 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
     horizon_token = _format_horizon_token(cfg.out_of_sight_horizon_sec)
     fixture_vocab = build_fixture_vocabulary(cfg.annotations_root, video_ids=cfg.video_ids)
 
+    # Over-generate candidates so skips do not reduce final output count too much
+    candidate_pool_per_video = max(cfg.max_questions_per_video * 5, cfg.max_questions_per_video)
+
     visibility_store = _load_visibility_store(cfg)
     original_track_loader = _install_precomputed_track_loader(visibility_store)
     try:
@@ -845,7 +860,7 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
             video_ids=cfg.video_ids,
             annotations_root=cfg.annotations_root,
             horizon_sec=cfg.out_of_sight_horizon_sec,
-            max_questions_per_video=cfg.max_questions_per_video,
+            max_questions_per_video=candidate_pool_per_video,
             sampling_fps=cfg.sampling_fps,
             fps_for_frame_lookup=cfg.fps_for_frame_lookup,
             intermediate_root=cfg.intermediate_root,
@@ -863,48 +878,54 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
 
     for video_id in cfg.video_ids:
         candidates = sorted(keyframes_by_video.get(video_id, []), key=lambda c: c.query_time_sec)
+        emitted_for_video = 0
+        target_for_video = cfg.max_questions_per_video
+
         for candidate in candidates:
-            states = caches.states_by_assoc_id(candidate.video_id, candidate.query_time_sec)
-            object_state = states.get(candidate.assoc_id)
-            if object_state is None:
-                continue
-
-            common = _build_common_fields(candidate)
-            # time_tok = _time_token(common["query_time_in_clip_sec"], input_key="video 1")
-            time_tok = _time_token(candidate.query_time_sec, input_key="video 1")
-            trajectory_id = f"oos_staged_{horizon_token}_{running_idx}"
-            steps: list[dict[str, Any]] = []
-
-            step1 = _build_step1_visibility(candidate, object_state, time_tok)
-            steps.append(step1)
-
-            if step1["correct_idx"] == 0:
-                key, payload = _finalize_trajectory(
-                    trajectory_id,
-                    common,
-                    steps,
-                    stop_reason="object_visible_at_query_time",
-                )
-                results[key] = payload
-                running_idx += 1
-                continue
-
-            last_visible = _find_last_visible_info(candidate, cfg, caches)
-            if last_visible is None:
-                key, payload = _finalize_trajectory(
-                    trajectory_id,
-                    common,
-                    steps,
-                    stop_reason="object_not_visible_but_no_last_visible_reference_found",
-                )
-                results[key] = payload
-                running_idx += 1
-                continue
-
-            last_visible = _fill_last_visible_info_from_motion_track(last_visible, candidate, cfg)
-            steps.append(_build_step2_last_visible(candidate, time_tok, last_visible, cfg))
+            if emitted_for_video >= target_for_video:
+                break
 
             try:
+                states = caches.states_by_assoc_id(candidate.video_id, candidate.query_time_sec)
+                object_state = states.get(candidate.assoc_id)
+                if object_state is None:
+                    continue
+
+                common = _build_common_fields(candidate)
+                time_tok = _time_token(candidate.query_time_sec, input_key="video 1")
+                trajectory_id = f"oos_staged_{horizon_token}_{running_idx}"
+                steps: list[dict[str, Any]] = []
+
+                step1 = _build_step1_visibility(candidate, object_state, time_tok)
+                steps.append(step1)
+
+                if step1["correct_idx"] == 0:
+                    key, payload = _finalize_trajectory(
+                        trajectory_id,
+                        common,
+                        steps,
+                        stop_reason="object_visible_at_query_time",
+                    )
+                    results[key] = payload
+                    running_idx += 1
+                    emitted_for_video += 1
+                    continue
+
+                last_visible = _find_last_visible_info(candidate, cfg, caches)
+                if last_visible is None:
+                    continue
+
+                last_visible = _fill_last_visible_info_from_motion_track(last_visible, candidate, cfg)
+
+                candidate_fixture = None
+                if last_visible.fixture is not None:
+                    candidate_fixture = semantic_fixture_name(last_visible.fixture)
+
+                if candidate_fixture is not None and _is_invalid_step3_fixture_label(candidate_fixture):
+                    continue
+
+                steps.append(_build_step2_last_visible(candidate, time_tok, last_visible, cfg))
+
                 steps.append(
                     _build_step3_fixture(
                         candidate,
@@ -915,85 +936,45 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
                         cfg=cfg,
                     )
                 )
-            except Exception as exc:
+
                 steps.append(
-                    {
-                        "step": 3,
-                        "question_class": "oos_step3_fixture",
-                        "question": (
-                            f"Based on the last visible position of the target {candidate.object_name}, "
-                            "which nearby fixture or landmark is closest to it?"
-                        ),
-                        "choices": [],
-                        "correct_idx": None,
-                        "answer_metadata": {
-                            "reference_time_sec": last_visible.sampled_time_sec,
-                            "error": repr(exc),
-                        },
-                        "skipped": True,
-                    }
+                    _build_step4_camera_pose_change(candidate, time_tok, last_visible, cfg, caches)
                 )
 
-            try:
-                steps.append(_build_step4_camera_pose_change(candidate, time_tok, last_visible, cfg, caches))
-            except Exception as exc:
-                steps.append(
-                    {
-                        "step": 4,
-                        "question_class": "oos_step4_camera_pose_change",
-                        "question": (
-                            f"At the current time {time_tok}, compared with when the target {candidate.object_name} was last visible, "
-                            "what is the net change in the camera's viewing direction?"
-                        ),
-                        "choices": CAMERA_POSE_CHANGE_CHOICES,
-                        "correct_idx": None,
-                        "answer_metadata": {
-                            "reference_time_sec": last_visible.sampled_time_sec,
-                            "error": repr(exc),
-                        },
-                        "skipped": True,
-                    }
-                )
-            try:
                 step5_camera_coordinates = _state_attr(object_state, "camera_coordinates")
-                steps.append(
-                    _build_step5_camera_quadrant(
-                        candidate,
-                        time_tok,
-                        step5_camera_coordinates,
-                    )
+                step5 = _build_step5_camera_quadrant(
+                    candidate,
+                    time_tok,
+                    step5_camera_coordinates,
                 )
-            except Exception as exc:
-                steps.append(
-                    {
-                        "step": 5,
-                        "question_class": "oos_step5_camera_quadrant",
-                        "question": (
-                            f"The target {candidate.object_name} which was moved earlier, was seen previously. "
-                            f"From your current viewpoint at {time_tok}, "
-                            f"in which direction is the target {candidate.object_name} located?"
-                        ),
-                        "choices": CAMERA_QUADRANT_CHOICES,
-                        "correct_idx": None,
-                        "answer_metadata": {
-                            "query_time_sec": candidate.query_time_sec,
-                            "camera_coordinates": _state_attr(object_state, "camera_coordinates"),
-                            "error": repr(exc),
-                        },
-                        "skipped": True,
-                    }
+                if step5.get("skipped"):
+                    continue
+                steps.append(step5)
+
+                key, payload = _finalize_trajectory(
+                    trajectory_id,
+                    common,
+                    steps,
+                    stop_reason="completed_out_of_sight_trajectory",
                 )
-            key, payload = _finalize_trajectory(
-                trajectory_id,
-                common,
-                steps,
-                stop_reason="completed_out_of_sight_trajectory",
+                results[key] = payload
+                running_idx += 1
+                emitted_for_video += 1
+
+            except ValueError as e:
+                print(
+                    f"[SKIP] trajectory skipped for video={candidate.video_id}, "
+                    f"assoc_id={candidate.assoc_id}, time={candidate.query_time_sec}: {e}"
+                )
+                continue
+
+        if emitted_for_video < target_for_video:
+            print(
+                f"[WARN] video {video_id}: emitted {emitted_for_video}/{target_for_video} "
+                f"valid trajectories. Candidate pool may be too small."
             )
-            results[key] = payload
-            running_idx += 1
 
     return results
-
 
 def save_benchmark_json(items: dict[str, dict[str, Any]], output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
