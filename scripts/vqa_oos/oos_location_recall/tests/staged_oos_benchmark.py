@@ -116,9 +116,21 @@ def _classify_camera_relative_direction(camera_coordinates: list[float], back_th
     return 0 if x < 0.0 else 1
 
 
+# def _camera_forward_world(ctx) -> tuple[float, float]:
+#     R = ctx.T_camera_world
+#     fx, fz = float(R[2][0]), float(R[2][2])
+#     norm = math.hypot(fx, fz)
+#     if norm < 1e-12:
+#         return (0.0, 1.0)
+#     return (fx / norm, fz / norm)
+
 def _camera_forward_world(ctx) -> tuple[float, float]:
     R = ctx.T_camera_world
-    fx, fz = float(R[2][0]), float(R[2][2])
+
+    # Use camera forward = -Z axis in world coordinates
+    fx = -float(R[0][2])
+    fz = -float(R[2][2])
+
     norm = math.hypot(fx, fz)
     if norm < 1e-12:
         return (0.0, 1.0)
@@ -157,6 +169,34 @@ def _classify_camera_pose_change(last_visible_time_sec: float, query_time_sec: f
         return 3, yaw_delta
     return (1, yaw_delta) if yaw_delta > 0.0 else (2, yaw_delta)
 
+def _classify_camera_pose_change(last_visible_time_sec: float, query_time_sec: float, candidate: KeyFrameCandidate, cfg: BenchmarkConfig) -> tuple[int, float]:
+    ctx_last = load_frame_context(
+        video_id=candidate.video_id,
+        time_sec=last_visible_time_sec,
+        annotations_root=cfg.annotations_root,
+        fps=cfg.fps_for_frame_lookup,
+        intermediate_root=cfg.intermediate_root,
+    )
+    ctx_query = load_frame_context(
+        video_id=candidate.video_id,
+        time_sec=query_time_sec,
+        annotations_root=cfg.annotations_root,
+        fps=cfg.fps_for_frame_lookup,
+        intermediate_root=cfg.intermediate_root,
+    )
+
+    yaw_delta = _signed_yaw_delta_deg(_camera_forward_world(ctx_last), _camera_forward_world(ctx_query))
+    abs_delta = abs(yaw_delta)
+
+    if abs_delta <= cfg.camera_turn_small_deg:
+        return 0, yaw_delta
+    if abs_delta >= cfg.camera_turn_back_deg:
+        return 3, yaw_delta
+
+    return (1, yaw_delta) if yaw_delta > 0.0 else (2, yaw_delta)
+
+
+
 
 def _load_config(path: Path) -> BenchmarkConfig:
     raw = _load_yaml(path)
@@ -172,7 +212,7 @@ def _load_config(path: Path) -> BenchmarkConfig:
         absolute_num_choices=int(raw.get("absolute", {}).get("num_choices", 5)),
         random_seed=int(raw.get("random_seed", 42)),
         back_threshold_deg=float(raw.get("camera_relative", {}).get("back_threshold_deg", 135.0)),
-        camera_turn_small_deg=float(raw.get("camera_pose_change", {}).get("no_change_threshold_deg", 30.0)),
+        camera_turn_small_deg=float(raw.get("camera_pose_change", {}).get("no_change_threshold_deg", 5.0)),
         camera_turn_back_deg=float(raw.get("camera_pose_change", {}).get("rotated_back_threshold_deg", 135.0)),
         intermediate_root=str(raw.get("intermediate_root", DEFAULT_INTERMEDIATE_ROOT)),
         output_json=(root / raw.get("output_json", "staged_oos_questions.json")).resolve(),

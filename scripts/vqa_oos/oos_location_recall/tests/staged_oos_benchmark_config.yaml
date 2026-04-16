@@ -1,4 +1,4 @@
-annotations_root: D:/3D_vision/hd-epic-annotations
+annotations_root: C:\3D-VLM-benchmark-OOS\HD-EPIC\hd-epic-annotations
 intermediate_root: Intermediate_data
 
 inputs:
@@ -19,7 +19,7 @@ camera_relative:
   back_threshold_deg: 135.0
 
 camera_pose_change:
-  no_change_threshold_deg: 30.0
+  no_change_threshold_deg: 5.0
   rotated_back_threshold_deg: 135.0
 
 output_json: ../../../outputs/staged_questions_debug/staged_oos_questions.json

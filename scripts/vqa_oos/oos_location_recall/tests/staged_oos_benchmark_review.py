@@ -290,6 +290,52 @@ def _render_question_card(video_path: Path, qid: str, qobj: dict[str, Any], anno
                     f"Projected pixel: {pix_str}",
                 ],
             )
+    elif qclass == "oos_step4_camera_pose_change":
+
+        ref_abs_time = (
+            qmeta.get("reference_time_sec")
+            or qmeta.get("previous_visible_time_sec")
+            or qmeta.get("sampled_last_visible_time_sec")
+        )
+
+        if ref_abs_time is None:
+            right_frame = Image.new("RGB", query_frame.size, color=(255, 255, 255))
+            right_panel = _panelize(
+                right_frame,
+                "RIGHT: reference frame",
+                _answer_lines(qobj) + ["Reference frame time not found in metadata."]
+            )
+        else:
+            ref_ctx = load_frame_context(
+                video_id=video_id,
+                time_sec=float(ref_abs_time),
+                annotations_root=annotations_root,
+                fps=fps,
+                intermediate_root=intermediate_root,
+            )
+            ref_frame = _read_frame_at_index(video_path, ref_ctx.frame_index)
+
+            ref_draw = ImageDraw.Draw(ref_frame)
+            ref_pixel = (
+                qmeta.get("reference_projected_pixel")
+                or qmeta.get("projected_pixel")
+            )
+            scaled_ref = _scale_pixel(
+                ref_pixel,
+                ref_frame.size,
+                (ref_ctx.image_width, ref_ctx.image_height),
+            )
+            if scaled_ref is not None:
+                _draw_marker(ref_draw, scaled_ref, "REF")
+
+            right_panel = _panelize(
+                ref_frame,
+                title="RIGHT: reference frame",
+                body_lines=[
+                    f"Reference time in clip: {_format_secs(qmeta.get('reference_time_in_clip_sec') or qmeta.get('sampled_last_visible_time_in_clip_sec'))}",
+                    f"Frame index: {ref_ctx.frame_index}",
+                ] + _answer_lines(qobj),
+            )
     else:
         answer_frame = Image.new("RGB", query_frame.size, color=(255, 255, 255))
         right_panel = _panelize(answer_frame, "RIGHT: answer", _answer_lines(qobj))
