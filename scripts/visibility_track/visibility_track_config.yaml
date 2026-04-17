@@ -4,14 +4,14 @@
 # (`scripts/visibility_track/`). Use absolute paths if the repo layout differs.
 
 # --- Dataset paths -----------------------------------------------------------
-annotations_root:       ../../../hd-epic-annotations
-data_root:              ../../../data
+annotations_root: ../../../hd-epic-annotations
+data_root: ../../../.
 intermediate_data_root: ../../../hd-epic-annotations/Intermediate_data
 
 # --- What to process ---------------------------------------------------------
 inputs:
   participants: [P01]
-  videos:       [P01-20240203-184045, P01-20240204-124504, P01-20240204-160230, P01-20240203-152323, P01-20240204-095114, P01-20240203-152956]
+  videos: [P01-20240203-184045]
 
 # --- Sampling rates ----------------------------------------------------------
 # How densely we evaluate "is the object in view?" (3D projection, very cheap).
@@ -34,16 +34,16 @@ geometric_occlusion:
 # --- Object detection (Grounding DINO) ---------------------------------------
 object_detection:
   enabled: true
-  model_id:          IDEA-Research/grounding-dino-tiny
-  roi_scale:         2.0
-  box_threshold:     0.30
-  text_threshold:    0.25
+  model_id: IDEA-Research/grounding-dino-tiny
+  roi_scale: 2.0
+  box_threshold: 0.30
+  text_threshold: 0.25
   visible_threshold: 0.62
   partial_threshold: 0.28
-  uncertainty_px:    40
+  uncertainty_px: 40
   # Pixel fallback when the projected object has no known bbox size.
   default_expected_size_px: 120
 
 # --- Output ------------------------------------------------------------------
-output_root: ../../outputs/visibility_track
+output_root: ./outputs/visibility_track
 random_seed: 42

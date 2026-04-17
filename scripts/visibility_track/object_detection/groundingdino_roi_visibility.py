@@ -37,13 +37,16 @@ import cv2
 import numpy as np
 from PIL import Image
 
+_IMPORT_ERROR: Optional[BaseException] = None
+
 try:
     import torch
     from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
-except Exception:  # pragma: no cover
+except Exception as e:  # pragma: no cover
     torch = None
     AutoProcessor = None
     AutoModelForZeroShotObjectDetection = None
+    _IMPORT_ERROR = e
 
 
 @dataclass
@@ -106,13 +109,19 @@ class TemporalSmoother:
         return self._score
 
 
-def get_device():
-    if torch.backends.mps.is_available():
-        return "mps"
-    elif torch.cuda.is_available():
+def get_device() -> str:
+    if torch is None:
+        raise ImportError(f"torch failed to import: {_IMPORT_ERROR}") from _IMPORT_ERROR
+
+    if torch.cuda.is_available():
         return "cuda"
-    else:
-        return "cpu"
+
+    # MPS is Apple/macOS only; guard it safely.
+    if hasattr(torch, "backends") and hasattr(torch.backends, "mps"):
+        if torch.backends.mps.is_available():
+            return "mps"
+
+    return "cpu"
 
 
 class GroundingDINODetector:
@@ -122,8 +131,12 @@ class GroundingDINODetector:
         device: Optional[str] = None,
     ) -> None:
         if AutoProcessor is None or AutoModelForZeroShotObjectDetection is None or torch is None:
+            if _IMPORT_ERROR is not None:
+                raise ImportError(
+                    f"Dependency import failed. Original error: {_IMPORT_ERROR!r}"
+                ) from _IMPORT_ERROR
             raise ImportError(
-                "Missing dependencies. Install with: pip install transformers torch pillow"
+                "Dependency import failed: torch/transformers did not load correctly."
             )
 
         if device is None:

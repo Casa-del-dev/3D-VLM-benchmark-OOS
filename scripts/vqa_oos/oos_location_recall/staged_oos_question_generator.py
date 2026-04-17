@@ -489,14 +489,27 @@ def _parse_visibility_tracks_json(
         return None
 
     if isinstance(raw_value, str):
+        if "{video_id}" in raw_value:
+            return {
+                video_id: (root / raw_value.format(video_id=video_id)).resolve()
+                for video_id in video_ids
+            }
         if len(video_ids) != 1:
             raise ValueError(
                 "visibility_tracks_json is a single path string, but multiple videos were provided. "
-                "Use a mapping: visibility_tracks_json: {video_id: path}"
+                "Use either a template string with {video_id}, "
+                "a mapping with template:, or a mapping: visibility_tracks_json: {video_id: path}"
             )
         return {video_ids[0]: (root / raw_value).resolve()}
 
     if isinstance(raw_value, dict):
+        if "template" in raw_value:
+            template = str(raw_value["template"])
+            return {
+                video_id: (root / template.format(video_id=video_id)).resolve()
+                for video_id in video_ids
+            }
+
         output: dict[str, Path] = {}
         for video_id in video_ids:
             if video_id not in raw_value:
@@ -505,15 +518,24 @@ def _parse_visibility_tracks_json(
         return output
 
     raise TypeError(
-        "visibility_tracks_json must be either a string path or a mapping from video_id to path."
+        "visibility_tracks_json must be either a string path, "
+        "a template string containing {video_id}, "
+        "a mapping with template:, or a mapping from video_id to path."
     )
-
 
 def _load_config(path: Path) -> BenchmarkConfig:
     raw = _load_yaml(path)
     root = path.parent
     inputs = raw.get("inputs", {})
     video_ids = [str(v) for v in inputs.get("videos", [])]
+
+    raw_output_json = str(raw.get("output_json", "staged_oos_questions.json"))
+    if "{video_id}" in raw_output_json:
+        if len(video_ids) != 1:
+            raise ValueError("output_json with {video_id} currently requires exactly one input video.")
+        resolved_output_json = (root / raw_output_json.format(video_id=video_ids[0])).resolve()
+    else:
+        resolved_output_json = (root / raw_output_json).resolve()
 
     return BenchmarkConfig(
         annotations_root=(root / raw["annotations_root"]).resolve(),
@@ -527,7 +549,7 @@ def _load_config(path: Path) -> BenchmarkConfig:
         camera_turn_small_deg=float(raw.get("camera_pose_change", {}).get("no_change_threshold_deg", 30.0)),
         camera_turn_back_deg=float(raw.get("camera_pose_change", {}).get("rotated_back_threshold_deg", 135.0)),
         intermediate_root=str(raw.get("intermediate_root", DEFAULT_INTERMEDIATE_ROOT)),
-        output_json=(root / raw.get("output_json", "staged_oos_questions.json")).resolve(),
+        output_json=resolved_output_json,
         visibility_tracks_json_by_video=_parse_visibility_tracks_json(
             raw.get("visibility_tracks_json"),
             root=root,
@@ -536,7 +558,6 @@ def _load_config(path: Path) -> BenchmarkConfig:
         pre_context_sec=float(raw.get("pre_context_sec", 2.0)),
         raw_video_width=float(raw["raw_video_width"]) if raw.get("raw_video_width") is not None else None,
         raw_video_height=float(raw["raw_video_height"]) if raw.get("raw_video_height") is not None else None,
-
     )
 
 def _normalize_projected_pixel(

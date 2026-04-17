@@ -29,16 +29,20 @@ brew install ffmpeg
 #### To generate in staged format
 
 1. precompute in-view tracks of all objects in a video
+
 ```bash
-python scripts/vqa_oos/oos_location_recall/precompute_inview_tracks.py --config scripts/vqa_oos/oos_location_recall/staged_oos_question_generator_config.yaml  
+python scripts/vqa_oos/oos_location_recall/precompute_inview_tracks.py --config scripts/vqa_oos/oos_location_recall/staged_oos_question_generator_config.yaml
 ```
-2. Generate staged questions 
-So far, the question include: visibility check, last visible frame detetcion, nearest fixture detection, camera viewing direction tracking
+
+2. Generate staged questions
+   So far, the question include: visibility check, last visible frame detetcion, nearest fixture detection, camera viewing direction tracking
+
 ```bash
 python scripts/vqa_oos/oos_location_recall/staged_oos_question_generator.py --config scripts/vqa_oos/oos_location_recall/staged_oos_question_generator_config.yaml
 ```
 
 #### Ivo's version
+
 From repository root:
 
 ```bash
@@ -77,6 +81,12 @@ And to view the question
 
 ```bash
 python scripts/vqa_oos/oos_location_recall/tests/staged_oos_benchmark_review.py --config scripts/vqa_oos/oos_location_recall/tests/staged_oos_benchmark_review_config.yaml
+```
+
+4. integration visualization of all
+
+```bash
+python scripts/vqa_oos/oos_location_recall/tests/visualize_staged_oos_questions.py --questions outputs/staged_questions_debug/staged_oos_trajectories_P01-20240202-110250_5_sec.json --video "D:\3D_vision\HD-EPIC\Videos\P01\P01-20240202-110250.mp4" --output_dir outputs/staged_questions_debug/question_visualizations --num_samples 30
 ```
 
 Both scripts write debug artifacts into the `outputs/` folder.
