@@ -1,0 +1,43 @@
+annotations_root: ../../../hd-epic-annotations
+intermediate_root: Intermediate_data
+
+inputs:
+  videos:
+    - P04-20240413-142619
+
+# Sampling
+sampling_fps: 1.0
+fps_for_frame_lookup: 30.0
+pre_context_sec: 2.0
+
+# Out-of-sight definition
+out_of_sight_horizon_sec: 5.0
+max_questions_per_video: 30
+
+# step 2
+raw_video_width: 1408
+raw_video_height: 1408
+
+# Step 3 (fixture)
+absolute:
+  num_choices: 5
+
+# Step 4 (camera motion)
+camera_pose_change:
+  no_change_threshold_deg: 30.0
+  rotated_back_threshold_deg: 135.0
+
+# (Optional, kept for consistency)
+camera_relative:
+  back_threshold_deg: 135.0
+
+# General
+random_seed: 42
+
+# Output
+output_json: outputs/generated_vqa/P04-20240413-142619_vqa.json
+
+#in_view track
+visibility_tracks_json:
+  P04-20240413-142619: outputs/merged_tracks/P04/P04-20240413-142619_merged_visibility_track.json
+

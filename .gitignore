@@ -8,3 +8,4 @@ tracks.json
 *.png
 *.jpg
 in_view_output.yaml
+scripts/staged_oos_vqa_generation/object_camera_relation/outputs/

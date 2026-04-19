@@ -1,0 +1,908 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.append(str(Path(__file__).resolve().parent))
+
+import argparse
+import bisect
+import json
+import math
+import random
+from dataclasses import asdict, dataclass
+from functools import lru_cache
+from typing import Any
+
+import key_frame_generator as kfg
+from abs_answer_determ import build_fixture_vocabulary, determine_absolute_answer, semantic_fixture_name
+from in_view_determination import (
+    DEFAULT_INTERMEDIATE_ROOT,
+    determine_in_view_objects,
+)
+from key_frame_generator import ObjectVisibilityTrack, VisibilitySpan, KeyFrameCandidate
+
+
+@dataclass(frozen=True)
+class BenchmarkConfig:
+    annotations_root: Path
+    video_ids: list[str]
+    sampling_fps: float = 2.0
+    fps_for_frame_lookup: float = 30.0
+    out_of_sight_horizon_sec: float = 2.0
+    max_questions_per_video: int = 20
+    absolute_num_choices: int = 5
+    random_seed: int = 42
+    intermediate_root: str = DEFAULT_INTERMEDIATE_ROOT
+    output_json: Path | None = None
+    visibility_tracks_json_by_video: dict[str, Path] | None = None
+    pre_context_sec: float = 2.0
+    raw_video_width: float | None = None
+    raw_video_height: float | None = None
+
+
+@dataclass(frozen=True)
+class LastVisibleInfo:
+    sampled_time_sec: float
+    projected_pixel: list[float] | None
+    camera_coordinates: list[float] | None
+    frame_index: int | None
+    status: str
+    fixture: str | None = None
+    world_coordinates: list[float] | None = None
+    reference_source: str | None = None
+
+
+CAMERA_QUADRANT_CHOICES = [
+    "Front-left",
+    "Front-right",
+    "Back-left",
+    "Back-right",
+]
+
+
+class VisibilityTrackStore:
+    def __init__(self, raw_by_video: dict[str, dict[str, Any]] | None):
+        self.raw_by_video = raw_by_video or {}
+        self._parsed_tracks_cache: dict[str, dict[str, ObjectVisibilityTrack]] = {}
+
+    def has_video(self, video_id: str) -> bool:
+        video = self.raw_by_video.get(video_id)
+        return bool(video and video.get("object_tracks") is not None)
+
+    def get_track_dict(self, video_id: str) -> dict[str, Any]:
+        video = self.raw_by_video.get(video_id, {})
+        return video.get("object_tracks", {})
+
+    @staticmethod
+    def _times_index(times: list[Any], time_sec: float) -> int | None:
+        idx = bisect.bisect_left(times, time_sec)
+        if idx >= len(times) or abs(float(times[idx]) - float(time_sec)) > 1e-6:
+            return None
+        return idx
+
+    @staticmethod
+    def _list_value(seq: list[Any] | None, idx: int) -> Any:
+        if seq is None or idx < 0 or idx >= len(seq):
+            return None
+        return seq[idx]
+
+    def get_object_tracks(self, video_id: str) -> dict[str, ObjectVisibilityTrack]:
+        cached = self._parsed_tracks_cache.get(video_id)
+        if cached is not None:
+            return cached
+
+        out: dict[str, ObjectVisibilityTrack] = {}
+        for assoc_id, tr in self.get_track_dict(video_id).items():
+            sampled_times = [float(t) for t in tr["sampled_times_sec"]]
+            visibility_samples = [
+                bool(v) for v in tr.get("visibility_samples", [False] * len(sampled_times))
+            ]
+
+            out[assoc_id] = ObjectVisibilityTrack(
+                assoc_id=assoc_id,
+                name=str(tr["name"]),
+                sampled_times_sec=sampled_times,
+                visibility_samples=visibility_samples,
+                stable_visibility_samples=[
+                    bool(v)
+                    for v in tr.get("stable_visibility_samples", [False] * len(sampled_times))
+                ],
+                status_samples=[
+                    str(v)
+                    for v in tr.get(
+                        "status_samples",
+                        ["visible" if bool(v) else "not_visible" for v in visibility_samples],
+                    )
+                ],
+                projected_pixel_samples=[
+                    [float(x) for x in v] if v is not None else None
+                    for v in tr.get("projected_pixel_samples", [None] * len(sampled_times))
+                ],
+                camera_coordinate_samples=[
+                    [float(x) for x in v] if v is not None else None
+                    for v in tr.get("camera_coordinate_samples", [None] * len(sampled_times))
+                ],
+                frame_index_samples=[
+                    int(v) if v is not None else None
+                    for v in tr.get("frame_index_samples", [None] * len(sampled_times))
+                ],
+                fixture_samples=[
+                    str(v) if v is not None else None
+                    for v in tr.get("fixture_samples", [None] * len(sampled_times))
+                ],
+                world_coordinate_samples=[
+                    [float(x) for x in v] if v is not None else None
+                    for v in tr.get("world_coordinate_samples", [None] * len(sampled_times))
+                ],
+                last_visible_index_before_each_sample=[
+                    int(v) if v is not None else None
+                    for v in tr.get("last_visible_index_before_each_sample", [None] * len(sampled_times))
+                ],
+                spans=[
+                    VisibilitySpan(
+                        start_sec=float(sp["start_sec"]),
+                        end_sec=float(sp["end_sec"]),
+                        in_view=bool(sp["in_view"]),
+                    )
+                    for sp in tr.get("spans", [])
+                ],
+            )
+
+        self._parsed_tracks_cache[video_id] = out
+        return out
+
+    def get_states_by_assoc_id(self, video_id: str, time_sec: float) -> dict[str, dict[str, Any]]:
+        tracks = self.get_track_dict(video_id)
+        if not tracks:
+            return {}
+
+        result: dict[str, dict[str, Any]] = {}
+        for assoc_id, tr in tracks.items():
+            times = tr.get("sampled_times_sec", [])
+            idx = self._times_index(times, time_sec)
+            if idx is None:
+                continue
+
+            visibility_samples = tr.get("visibility_samples", [])
+            stable_visibility_samples = tr.get("stable_visibility_samples", [False] * len(times))
+            status_samples = tr.get("status_samples", [])
+            projected_pixel_samples = tr.get("projected_pixel_samples", [])
+            camera_coordinate_samples = tr.get("camera_coordinate_samples", [])
+            frame_index_samples = tr.get("frame_index_samples", [])
+            fixture_samples = tr.get("fixture_samples", [])
+            world_coordinate_samples = tr.get("world_coordinate_samples", [])
+
+            is_visible = bool(self._list_value(visibility_samples, idx))
+            is_stably_visible = bool(self._list_value(stable_visibility_samples, idx))
+            status = self._list_value(status_samples, idx)
+            if status is None:
+                status = "visible" if is_visible else "not_visible"
+
+            result[assoc_id] = {
+                "assoc_id": assoc_id,
+                "name": tr.get("name"),
+                "status": str(status),
+                "is_visible": is_visible,
+                "is_stably_visible": is_stably_visible,
+                "projected_pixel": self._list_value(projected_pixel_samples, idx),
+                "camera_coordinates": self._list_value(camera_coordinate_samples, idx),
+                "frame_number": self._list_value(frame_index_samples, idx),
+                "fixture": self._list_value(fixture_samples, idx),
+                "world_coordinates": self._list_value(world_coordinate_samples, idx),
+            }
+        return result
+
+    def find_last_visible_before(
+        self,
+        video_id: str,
+        assoc_id: str,
+        query_time_sec: float,
+        clip_start_time_sec: float,
+    ) -> LastVisibleInfo | None:
+        track = self.get_track_dict(video_id).get(assoc_id)
+        if track is None:
+            return None
+
+        times = track.get("sampled_times_sec", [])
+        if not times:
+            return None
+
+        idx = self._times_index(times, query_time_sec)
+        if idx is None:
+            idx = bisect.bisect_left(times, query_time_sec)
+            if idx >= len(times):
+                idx = len(times) - 1
+
+        last_visible_idxs = track.get("last_visible_index_before_each_sample")
+        if last_visible_idxs is not None and idx < len(last_visible_idxs):
+            last_idx = last_visible_idxs[idx]
+            if last_idx is not None and float(times[last_idx]) >= clip_start_time_sec - 1e-9:
+                return LastVisibleInfo(
+                    sampled_time_sec=float(times[last_idx]),
+                    projected_pixel=self._list_value(track.get("projected_pixel_samples", []), last_idx),
+                    camera_coordinates=self._list_value(track.get("camera_coordinate_samples", []), last_idx),
+                    frame_index=self._list_value(track.get("frame_index_samples", []), last_idx),
+                    status=str(self._list_value(track.get("status_samples", []), last_idx) or "ok"),
+                    fixture=self._list_value(track.get("fixture_samples", []), last_idx),
+                    world_coordinates=self._list_value(track.get("world_coordinate_samples", []), last_idx),
+                    reference_source="precomputed_visibility_track",
+                )
+
+        stable_visibility_samples = track.get("stable_visibility_samples", [])
+        idx = min(idx - 1 if self._times_index(times, query_time_sec) is not None else idx, len(times) - 1)
+        while idx >= 0 and float(times[idx]) >= clip_start_time_sec - 1e-9:
+            if bool(self._list_value(stable_visibility_samples, idx)):
+                return LastVisibleInfo(
+                    sampled_time_sec=float(times[idx]),
+                    projected_pixel=self._list_value(track.get("projected_pixel_samples", []), idx),
+                    camera_coordinates=self._list_value(track.get("camera_coordinate_samples", []), idx),
+                    frame_index=self._list_value(track.get("frame_index_samples", []), idx),
+                    status=str(self._list_value(track.get("status_samples", []), idx) or "ok"),
+                    fixture=self._list_value(track.get("fixture_samples", []), idx),
+                    world_coordinates=self._list_value(track.get("world_coordinate_samples", []), idx),
+                    reference_source="precomputed_visibility_track",
+                )
+            idx -= 1
+        return None
+
+
+class RuntimeCaches:
+    def __init__(self, cfg: BenchmarkConfig, visibility_store: VisibilityTrackStore | None = None):
+        self.cfg = cfg
+        self.visibility_store = visibility_store or VisibilityTrackStore(None)
+
+    @staticmethod
+    def _norm_time(time_sec: float) -> float:
+        return round(float(time_sec), 6)
+
+    @lru_cache(maxsize=20000)
+    def live_states_by_assoc_id(self, video_id: str, time_sec: float) -> dict[str, Any]:
+        time_sec = self._norm_time(time_sec)
+        states = determine_in_view_objects(
+            video_id=video_id,
+            time_sec=time_sec,
+            annotations_root=self.cfg.annotations_root,
+            fps=self.cfg.fps_for_frame_lookup,
+            intermediate_root=self.cfg.intermediate_root,
+        )
+        return {s.assoc_id: s for s in states}
+
+    @lru_cache(maxsize=20000)
+    def states_by_assoc_id(self, video_id: str, time_sec: float) -> dict[str, Any]:
+        time_sec = self._norm_time(time_sec)
+
+        if self.visibility_store.has_video(video_id):
+            states = self.visibility_store.get_states_by_assoc_id(video_id, time_sec)
+            if states:
+                return states
+
+        return self.live_states_by_assoc_id(video_id, time_sec)
+
+
+def _load_yaml(path: Path) -> dict[str, Any]:
+    try:
+        import yaml  # type: ignore
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "PyYAML is required to load the benchmark config. Install it with: pip install pyyaml"
+        ) from exc
+    with path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _format_horizon_token(horizon_sec: float) -> str:
+    return f"h{horizon_sec:.1f}".replace(".", "p")
+
+
+def _format_time_hms_1dp(time_sec: float) -> str:
+    t = max(0.0, float(time_sec))
+    hours = int(t // 3600)
+    minutes = int((t % 3600) // 60)
+    seconds = t - (hours * 3600 + minutes * 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:04.1f}"
+
+
+def _time_token(time_sec: float, input_key: str = "video 1") -> str:
+    return f"<TIME {_format_time_hms_1dp(time_sec)} {input_key}>"
+
+
+def _is_visible_state(state: Any) -> bool:
+    if state is None:
+        return False
+    if isinstance(state, dict):
+        return bool(state.get("is_visible"))
+    return bool((state.status == "ok" and state.in_view) or state.status == "in_motion")
+
+
+def _state_attr(state: Any, name: str, default: Any = None) -> Any:
+    if state is None:
+        return default
+    if isinstance(state, dict):
+        return state.get(name, default)
+    return getattr(state, name, default)
+
+
+def _find_last_visible_info(
+    candidate: KeyFrameCandidate,
+    cfg: BenchmarkConfig,
+    caches: RuntimeCaches,
+) -> LastVisibleInfo | None:
+    if caches.visibility_store.has_video(candidate.video_id):
+        last_visible = caches.visibility_store.find_last_visible_before(
+            video_id=candidate.video_id,
+            assoc_id=candidate.assoc_id,
+            query_time_sec=candidate.query_time_sec,
+            clip_start_time_sec=candidate.clip_start_time_sec,
+        )
+        if last_visible is not None:
+            return last_visible
+
+    step = 1.0 / cfg.sampling_fps
+    t = candidate.query_time_sec - step
+    while t >= candidate.clip_start_time_sec - 1e-9:
+        state = caches.live_states_by_assoc_id(candidate.video_id, round(t, 6)).get(candidate.assoc_id)
+        is_stable_visible = bool(
+            (not isinstance(state, dict) and state is not None and state.status == "ok" and bool(state.in_view))
+            or (isinstance(state, dict) and bool(state.get("is_stably_visible")))
+        )
+        if is_stable_visible:
+            projected_pixel = _state_attr(state, "projected_pixel")
+            frame_number = _state_attr(state, "frame_number")
+            camera_coordinates = _state_attr(state, "camera_coordinates")
+            return LastVisibleInfo(
+                sampled_time_sec=float(round(t, 6)),
+                projected_pixel=[float(v) for v in projected_pixel] if projected_pixel is not None else None,
+                camera_coordinates=[float(v) for v in camera_coordinates] if camera_coordinates is not None else None,
+                frame_index=int(frame_number) if frame_number is not None else None,
+                status=str(_state_attr(state, "status", "ok")),
+                fixture=_state_attr(state, "fixture"),
+                world_coordinates=_state_attr(state, "world_coordinates"),
+                reference_source="live_visibility_scan",
+            )
+        t -= step
+    return None
+
+
+def _parse_visibility_tracks_json(
+    raw_value: Any,
+    root: Path,
+    video_ids: list[str],
+) -> dict[str, Path] | None:
+    if raw_value is None:
+        return None
+
+    if isinstance(raw_value, str):
+        if len(video_ids) != 1:
+            raise ValueError(
+                "visibility_tracks_json is a single path string, but multiple videos were provided. "
+                "Use a mapping: visibility_tracks_json: {video_id: path}"
+            )
+        return {video_ids[0]: (root / raw_value).resolve()}
+
+    if isinstance(raw_value, dict):
+        output: dict[str, Path] = {}
+        for video_id in video_ids:
+            if video_id not in raw_value:
+                raise ValueError(f"Missing visibility_tracks_json entry for video '{video_id}'.")
+            output[video_id] = (root / str(raw_value[video_id])).resolve()
+        return output
+
+    raise TypeError(
+        "visibility_tracks_json must be either a string path or a mapping from video_id to path."
+    )
+
+
+def _load_config(path: Path) -> BenchmarkConfig:
+    raw = _load_yaml(path)
+    root = path.parent
+    inputs = raw.get("inputs", {})
+    video_ids = [str(v) for v in inputs.get("videos", [])]
+
+    return BenchmarkConfig(
+        annotations_root=(root / raw["annotations_root"]).resolve(),
+        video_ids=video_ids,
+        sampling_fps=float(raw.get("sampling_fps", 2.0)),
+        fps_for_frame_lookup=float(raw.get("fps_for_frame_lookup", 30.0)),
+        out_of_sight_horizon_sec=float(raw.get("out_of_sight_horizon_sec", 2.0)),
+        max_questions_per_video=int(raw.get("max_questions_per_video", 20)),
+        absolute_num_choices=int(raw.get("absolute", {}).get("num_choices", 5)),
+        random_seed=int(raw.get("random_seed", 42)),
+        intermediate_root=str(raw.get("intermediate_root", DEFAULT_INTERMEDIATE_ROOT)),
+        output_json=(root / raw.get("output_json", "staged_oos_questions.json")).resolve(),
+        visibility_tracks_json_by_video=_parse_visibility_tracks_json(
+            raw.get("visibility_tracks_json"),
+            root=root,
+            video_ids=video_ids,
+        ),
+        pre_context_sec=float(raw.get("pre_context_sec", 2.0)),
+        raw_video_width=float(raw["raw_video_width"]) if raw.get("raw_video_width") is not None else None,
+        raw_video_height=float(raw["raw_video_height"]) if raw.get("raw_video_height") is not None else None,
+    )
+
+
+def _normalize_projected_pixel(
+    projected_pixel: list[float] | None,
+    raw_video_width: float | None,
+    raw_video_height: float | None,
+) -> list[float] | None:
+    if (
+        projected_pixel is None
+        or raw_video_width is None
+        or raw_video_height is None
+        or raw_video_width == 0
+        or raw_video_height == 0
+        or len(projected_pixel) < 2
+    ):
+        return None
+
+    return [
+        float(projected_pixel[0]) / float(raw_video_width),
+        float(projected_pixel[1]) / float(raw_video_height),
+    ]
+
+
+def _build_common_fields(candidate: KeyFrameCandidate) -> dict[str, Any]:
+    query_time_in_clip_sec = candidate.query_time_sec - candidate.clip_start_time_sec
+    return {
+        "inputs": {"video 1": {"id": candidate.video_id}},
+        "video_id": candidate.video_id,
+        "object_a_assoc_id": candidate.assoc_id,
+        "object_a_name": candidate.object_name,
+        "query_time_sec": candidate.query_time_sec,
+        "query_time_in_clip_sec": query_time_in_clip_sec,
+        "clip_start_time_sec": candidate.clip_start_time_sec,
+        "clip_end_time_sec": candidate.clip_end_time_sec,
+        "clip_duration_sec": candidate.clip_duration_sec,
+        "horizon_sec": candidate.horizon_sec,
+        "generation_info": asdict(candidate),
+    }
+
+
+def _build_step1_visibility(candidate: KeyFrameCandidate, object_state: Any, time_tok: str) -> dict[str, Any]:
+    is_visible = _is_visible_state(object_state)
+    return {
+        "step": 1,
+        "question_class": "oos_step1_visibility",
+        "question": (
+            f"At the current time {time_tok}, is the target {candidate.object_name} that was moved earlier visible in the current frame?"
+        ),
+        "choices": ["Yes", "No"],
+        "correct_idx": 0 if is_visible else 1,
+        "answer_metadata": {
+            "status": _state_attr(object_state, "status"),
+            "is_visible": _state_attr(object_state, "is_visible"),
+            "is_stably_visible": _state_attr(object_state, "is_stably_visible"),
+            "projected_pixel": _state_attr(object_state, "projected_pixel"),
+            "camera_coordinates": _state_attr(object_state, "camera_coordinates"),
+            "frame_index": _state_attr(object_state, "frame_number"),
+        },
+    }
+
+
+def _build_step2_last_visible(
+    candidate: KeyFrameCandidate,
+    time_tok: str,
+    last_visible: LastVisibleInfo,
+    cfg: BenchmarkConfig,
+) -> dict[str, Any]:
+    normalized_projected_pixel = _normalize_projected_pixel(
+        last_visible.projected_pixel,
+        cfg.raw_video_width,
+        cfg.raw_video_height,
+    )
+    last_visible_time_token = _time_token(last_visible.sampled_time_sec, input_key="video 1")
+
+    return {
+        "step": 2,
+        "question_class": "oos_step2_last_visible",
+        "question": (
+            f"At the current time {time_tok}, the target {candidate.object_name} that was moved earlier is not visible. "
+            f"When was it last visible, and where was it located in the image?"
+        ),
+        "choices": [],
+        "correct_idx": None,
+        "answer_metadata": {
+            "sampled_last_visible_time_sec": last_visible.sampled_time_sec,
+            "sampled_last_visible_time_in_clip_sec": last_visible.sampled_time_sec - candidate.clip_start_time_sec,
+            "sampled_last_visible_time_token": last_visible_time_token,
+            "projected_pixel": last_visible.projected_pixel,
+            "normalized_projected_pixel": normalized_projected_pixel,
+            "camera_coordinates": last_visible.camera_coordinates,
+            "frame_index": last_visible.frame_index,
+            "status": last_visible.status,
+            "fixture": last_visible.fixture,
+            "world_coordinates": last_visible.world_coordinates,
+            "reference_source": last_visible.reference_source,
+            "note": (
+                "Uses the precomputed visibility track when available and otherwise falls back to "
+                "live visibility computation over stable-visible states only. If the last visible "
+                "state is in_motion, the trajectory is skipped."
+            ),
+        },
+    }
+
+
+def _is_invalid_step3_fixture_label(label: str | None) -> bool:
+    if label is None:
+        return True
+    normalized = str(label).strip().lower()
+    return normalized in {"", "mid-air"}
+
+
+def _build_step3_fixture(
+    candidate: KeyFrameCandidate,
+    time_tok: str,
+    *,
+    last_visible: LastVisibleInfo,
+    fixture_vocab: list[str],
+    rng: random.Random,
+    cfg: BenchmarkConfig,
+) -> dict[str, Any]:
+    if last_visible.fixture is not None:
+        correct_fixture = semantic_fixture_name(last_visible.fixture)
+        if not correct_fixture:
+            raise ValueError(f"Could not normalize fixture {last_visible.fixture!r}")
+        if _is_invalid_step3_fixture_label(correct_fixture):
+            raise ValueError(
+                f"Fixture label {last_visible.fixture!r} normalized to {correct_fixture!r} "
+                "is not valid for step 3 question."
+            )
+
+        distractors = sorted({
+            str(f)
+            for f in fixture_vocab
+            if str(f) and str(f) != correct_fixture and not _is_invalid_step3_fixture_label(str(f))
+        })
+
+        if len(distractors) < cfg.absolute_num_choices - 1:
+            raise ValueError(
+                f"Not enough semantic fixture types for step 3: need {cfg.absolute_num_choices}, "
+                f"but only found {len(distractors) + 1} including the correct answer."
+            )
+
+        chosen_distractors = rng.sample(distractors, k=cfg.absolute_num_choices - 1)
+        choices = [correct_fixture] + chosen_distractors
+        rng.shuffle(choices)
+
+        return {
+            "step": 3,
+            "question_class": "oos_step3_fixture",
+            "question": (
+                f"At the current time {time_tok}, based on the last placement of the target "
+                f"{candidate.object_name} that was moved earlier, which nearby fixture or landmark is closest to it?"
+            ),
+            "choices": choices,
+            "correct_idx": choices.index(correct_fixture),
+            "answer_metadata": {
+                "reference_time_sec": last_visible.sampled_time_sec,
+                "correct_fixture": correct_fixture,
+                "raw_correct_fixture": str(last_visible.fixture),
+                "reference_source": last_visible.reference_source,
+            },
+        }
+
+    abs_answer = determine_absolute_answer(
+        video_id=candidate.video_id,
+        time_sec=last_visible.sampled_time_sec,
+        object_a_assoc_id=candidate.assoc_id,
+        annotations_root=cfg.annotations_root,
+        num_choices=cfg.absolute_num_choices,
+        fixture_vocabulary=fixture_vocab,
+        rng=rng,
+    )
+    if _is_invalid_step3_fixture_label(abs_answer.correct_fixture):
+        raise ValueError(f"Invalid step 3 fixture answer: {abs_answer.correct_fixture!r}")
+
+    return {
+        "step": 3,
+        "question_class": "oos_step3_fixture",
+        "question": (
+            f"At the current time {time_tok}, based on the last placement of the target "
+            f"{candidate.object_name} that was moved earlier, which nearby fixture or landmark is closest to it?"
+        ),
+        "choices": abs_answer.choices,
+        "correct_idx": abs_answer.correct_idx,
+        "answer_metadata": {
+            "reference_time_sec": last_visible.sampled_time_sec,
+            "correct_fixture": abs_answer.correct_fixture,
+            "reference_source": last_visible.reference_source,
+        },
+    }
+
+
+def classify_camera_quadrant_robust(
+    camera_coordinates,
+    *,
+    center_margin=0.05,
+    depth_margin=0.05,
+    angle_margin_deg=5.0,
+):
+    if camera_coordinates is None or len(camera_coordinates) < 3:
+        return None, None, {"reason": "no_coordinates"}
+
+    x, _, z = [float(v) for v in camera_coordinates[:3]]
+
+    if abs(z) < depth_margin:
+        return None, None, {"reason": "near_z_boundary", "x": x, "z": z}
+
+    if abs(x) < center_margin:
+        return None, None, {"reason": "near_x_boundary", "x": x, "z": z}
+
+    yaw_deg = math.degrees(math.atan2(x, z))
+    if abs(abs(yaw_deg) - 90.0) < angle_margin_deg:
+        return None, None, {"reason": "near_diagonal_boundary", "yaw_deg": yaw_deg}
+
+    if z > 0:
+        if x < 0:
+            return 0, "Front-left", {"x": x, "z": z}
+        return 1, "Front-right", {"x": x, "z": z}
+    else:
+        if x < 0:
+            return 2, "Back-left", {"x": x, "z": z}
+        return 3, "Back-right", {"x": x, "z": z}
+
+
+def _build_step5_camera_quadrant(candidate, time_tok, camera_coordinates):
+    correct_idx, label, debug = classify_camera_quadrant_robust(
+        camera_coordinates,
+        center_margin=0.05,
+        depth_margin=0.05,
+        angle_margin_deg=5.0,
+    )
+
+    return {
+        "step": 5,
+        "question_class": "oos_step5_camera_quadrant",
+        "question": (
+            f"The {candidate.object_name} that was last moved was seen earlier. From where you are now at {time_tok}, "
+            f"in which direction is the target {candidate.object_name}?"
+        ),
+        "choices": CAMERA_QUADRANT_CHOICES,
+        "correct_idx": correct_idx,
+        "answer_metadata": {
+            "camera_coordinates": camera_coordinates,
+            "label": label,
+            "debug": debug,
+        },
+        "skipped": correct_idx is None,
+    }
+
+
+def _finalize_trajectory(
+    trajectory_id: str,
+    common: dict[str, Any],
+    steps: list[dict[str, Any]],
+    *,
+    stop_reason: str,
+) -> tuple[str, dict[str, Any]]:
+    return trajectory_id, {
+        **common,
+        "question_class": "oos_staged_trajectory",
+        "trajectory_id": trajectory_id,
+        "num_steps": len(steps),
+        "terminated_at_step": steps[-1]["step"] if steps else None,
+        "stop_reason": stop_reason,
+        "steps": steps,
+    }
+
+
+def _load_visibility_store(cfg: BenchmarkConfig) -> VisibilityTrackStore:
+    if not cfg.visibility_tracks_json_by_video:
+        return VisibilityTrackStore(None)
+
+    raw_by_video: dict[str, dict[str, Any]] = {}
+    for video_id, path in cfg.visibility_tracks_json_by_video.items():
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Configured visibility track JSON for video '{video_id}' does not exist: {path}"
+            )
+        raw_by_video[video_id] = _load_json(path)
+
+    return VisibilityTrackStore(raw_by_video)
+
+
+def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]:
+    if not cfg.video_ids:
+        raise ValueError("No input videos were provided in the config.")
+
+    rng = random.Random(cfg.random_seed)
+    horizon_token = _format_horizon_token(cfg.out_of_sight_horizon_sec)
+    fixture_vocab = build_fixture_vocabulary(cfg.annotations_root, video_ids=cfg.video_ids)
+    candidate_pool_per_video = max(cfg.max_questions_per_video * 5, cfg.max_questions_per_video)
+
+    visibility_store = _load_visibility_store(cfg)
+    precomputed_tracks_by_video = {
+        video_id: visibility_store.get_object_tracks(video_id)
+        for video_id in cfg.video_ids
+        if visibility_store.has_video(video_id)
+    }
+
+    keyframes_by_video = kfg.generate_key_frames_for_videos(
+        video_ids=cfg.video_ids,
+        annotations_root=cfg.annotations_root,
+        horizon_sec=cfg.out_of_sight_horizon_sec,
+        max_questions_per_video=candidate_pool_per_video,
+        sampling_fps=cfg.sampling_fps,
+        fps_for_frame_lookup=cfg.fps_for_frame_lookup,
+        intermediate_root=cfg.intermediate_root,
+        random_seed=cfg.random_seed,
+        pre_context_sec=cfg.pre_context_sec,
+        precomputed_tracks_by_video=precomputed_tracks_by_video,
+    )
+
+    caches = RuntimeCaches(cfg, visibility_store)
+
+    results: dict[str, dict[str, Any]] = {}
+    running_idx = 0
+
+    for video_id in cfg.video_ids:
+        candidates = sorted(keyframes_by_video.get(video_id, []), key=lambda c: c.query_time_sec)
+        emitted_for_video = 0
+        target_for_video = cfg.max_questions_per_video
+
+        for candidate in candidates:
+            if emitted_for_video >= target_for_video:
+                break
+
+            try:
+                states = caches.states_by_assoc_id(candidate.video_id, candidate.query_time_sec)
+                object_state = states.get(candidate.assoc_id)
+                if object_state is None:
+                    continue
+
+                common = _build_common_fields(candidate)
+                time_tok = _time_token(candidate.query_time_sec, input_key="video 1")
+                trajectory_id = f"oos_staged_{horizon_token}_{running_idx}"
+                steps: list[dict[str, Any]] = []
+
+                step1 = _build_step1_visibility(candidate, object_state, time_tok)
+                steps.append(step1)
+
+                if step1["correct_idx"] == 0:
+                    key, payload = _finalize_trajectory(
+                        trajectory_id,
+                        common,
+                        steps,
+                        stop_reason="object_visible_at_query_time",
+                    )
+                    results[key] = payload
+                    running_idx += 1
+                    emitted_for_video += 1
+                    continue
+
+                last_visible = _find_last_visible_info(candidate, cfg, caches)
+                if last_visible is None:
+                    continue
+
+                if last_visible.status == "in_motion":
+                    continue
+
+                candidate_fixture = None
+                if last_visible.fixture is not None:
+                    candidate_fixture = semantic_fixture_name(last_visible.fixture)
+
+                if candidate_fixture is not None and _is_invalid_step3_fixture_label(candidate_fixture):
+                    continue
+
+                steps.append(_build_step2_last_visible(candidate, time_tok, last_visible, cfg))
+                steps.append(
+                    _build_step3_fixture(
+                        candidate,
+                        time_tok,
+                        last_visible=last_visible,
+                        fixture_vocab=fixture_vocab,
+                        rng=rng,
+                        cfg=cfg,
+                    )
+                )
+
+                step5_camera_coordinates = _state_attr(object_state, "camera_coordinates")
+                step5 = _build_step5_camera_quadrant(candidate, time_tok, step5_camera_coordinates)
+                if step5.get("skipped"):
+                    continue
+                steps.append(step5)
+
+                key, payload = _finalize_trajectory(
+                    trajectory_id,
+                    common,
+                    steps,
+                    stop_reason="completed_out_of_sight_trajectory",
+                )
+                results[key] = payload
+                running_idx += 1
+                emitted_for_video += 1
+
+            except ValueError as e:
+                print(
+                    f"[SKIP] trajectory skipped for video={candidate.video_id}, "
+                    f"assoc_id={candidate.assoc_id}, time={candidate.query_time_sec}: {e}"
+                )
+                continue
+
+        if emitted_for_video < target_for_video:
+            print(
+                f"[WARN] video {video_id}: emitted {emitted_for_video}/{target_for_video} "
+                f"valid trajectories. Candidate pool may be too small."
+            )
+
+    return results
+
+
+def save_benchmark_json(items: dict[str, dict[str, Any]], output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump(items, f, indent=2, ensure_ascii=False)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate staged OOS benchmark trajectories")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path(__file__).resolve().parent / "staged_oos_trajectory_config.yaml",
+        help="Path to the staged benchmark config YAML",
+    )
+    parser.add_argument(
+        "--output_json",
+        type=Path,
+        default=None,
+        help="Optional output JSON override",
+    )
+    parser.add_argument(
+        "--visibility_tracks_json",
+        type=Path,
+        default=None,
+        help="Optional precomputed visibility track JSON override",
+    )
+    parser.add_argument(
+        "--pre_context_sec",
+        type=float,
+        default=None,
+        help="Seconds before last visible time to include in clip",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    cfg = _load_config(args.config.resolve())
+
+    output_json = args.output_json.resolve() if args.output_json is not None else cfg.output_json
+    visibility_tracks_json_by_video = dict(cfg.visibility_tracks_json_by_video or {})
+
+    if args.visibility_tracks_json is not None:
+        if len(cfg.video_ids) != 1:
+            raise ValueError(
+                "--visibility_tracks_json can only be used when exactly one input video is provided."
+            )
+        visibility_tracks_json_by_video[cfg.video_ids[0]] = args.visibility_tracks_json.resolve()
+
+    pre_context_sec = args.pre_context_sec if args.pre_context_sec is not None else cfg.pre_context_sec
+
+    cfg = BenchmarkConfig(
+        **{
+            **asdict(cfg),
+            "output_json": output_json,
+            "visibility_tracks_json_by_video": visibility_tracks_json_by_video,
+            "pre_context_sec": pre_context_sec,
+        }
+    )
+
+    benchmark = generate_staged_benchmark(cfg)
+    save_benchmark_json(benchmark, output_json)
+
+    print(f"Generated {len(benchmark)} staged OOS trajectories")
+    if visibility_tracks_json_by_video:
+        for video_id, path in visibility_tracks_json_by_video.items():
+            print(f"[{video_id}] Using visibility tracks: {path}")
+    print(f"Saved JSON: {output_json}")
+
+
+if __name__ == "__main__":
+    main()
