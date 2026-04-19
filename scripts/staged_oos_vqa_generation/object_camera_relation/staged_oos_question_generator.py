@@ -463,6 +463,18 @@ def _build_common_fields(candidate: KeyFrameCandidate) -> dict[str, Any]:
         "generation_info": asdict(candidate),
     }
 
+def _finalize_choices(
+    choices: list[str],
+    correct_answer: str,
+    rng: random.Random,
+    *,
+    shuffle: bool = True,
+) -> tuple[list[str], int]:
+    final_choices = list(choices)
+    if shuffle:
+        rng.shuffle(final_choices)
+    correct_idx = final_choices.index(correct_answer)
+    return final_choices, correct_idx
 
 def _build_step1_visibility(candidate: KeyFrameCandidate, object_state: Any, time_tok: str) -> dict[str, Any]:
     is_visible = _is_visible_state(object_state)
@@ -648,13 +660,21 @@ def classify_camera_quadrant_robust(
         return 3, "Back-right", {"x": x, "z": z}
 
 
-def _build_step5_camera_quadrant(candidate, time_tok, camera_coordinates):
+def _build_step5_camera_quadrant(candidate, time_tok, camera_coordinates, rng):
     correct_idx, label, debug = classify_camera_quadrant_robust(
         camera_coordinates,
         center_margin=0.05,
         depth_margin=0.05,
         angle_margin_deg=5.0,
     )
+    choices = list(CAMERA_QUADRANT_CHOICES)
+    if label is not None and label in choices:
+        choices, correct_idx = _finalize_choices(
+            choices=choices,
+            correct_answer=label,
+            rng=rng,
+            shuffle=True,
+        )
 
     return {
         "step": 5,
@@ -663,7 +683,7 @@ def _build_step5_camera_quadrant(candidate, time_tok, camera_coordinates):
             f"The {candidate.object_name} that was last moved was seen earlier. From where you are now at {time_tok}, "
             f"in which direction is the target {candidate.object_name}?"
         ),
-        "choices": CAMERA_QUADRANT_CHOICES,
+        "choices": choices,
         "correct_idx": correct_idx,
         "answer_metadata": {
             "camera_coordinates": camera_coordinates,
@@ -803,7 +823,7 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
                 )
 
                 step5_camera_coordinates = _state_attr(object_state, "camera_coordinates")
-                step5 = _build_step5_camera_quadrant(candidate, time_tok, step5_camera_coordinates)
+                step5 = _build_step5_camera_quadrant(candidate, time_tok, step5_camera_coordinates, rng)
                 if step5.get("skipped"):
                     continue
                 steps.append(step5)
