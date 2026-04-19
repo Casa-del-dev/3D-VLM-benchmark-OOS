@@ -476,16 +476,23 @@ def _finalize_choices(
     correct_idx = final_choices.index(correct_answer)
     return final_choices, correct_idx
 
-def _build_step1_visibility(candidate: KeyFrameCandidate, object_state: Any, time_tok: str) -> dict[str, Any]:
+def _build_step1_visibility(candidate: KeyFrameCandidate, object_state: Any, time_tok: str, rng) -> dict[str, Any]:
     is_visible = _is_visible_state(object_state)
+    correct_answer = "Yes" if is_visible else "No"
+    choices, correct_idx = _finalize_choices(
+        choices=["Yes", "No"],
+        correct_answer=correct_answer,
+        rng=rng,
+        shuffle=True,
+    )
     return {
         "step": 1,
         "question_class": "oos_step1_visibility",
         "question": (
             f"At the current time {time_tok}, is the target {candidate.object_name} that was moved earlier visible in the current frame?"
         ),
-        "choices": ["Yes", "No"],
-        "correct_idx": 0 if is_visible else 1,
+        "choices": choices,
+        "correct_idx": correct_idx,
         "answer_metadata": {
             "status": _state_attr(object_state, "status"),
             "is_visible": _state_attr(object_state, "is_visible"),
