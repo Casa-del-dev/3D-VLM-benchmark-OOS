@@ -21,7 +21,8 @@ from in_view_determination import (
     determine_in_view_objects,
 )
 from key_frame_generator import ObjectVisibilityTrack, VisibilitySpan, KeyFrameCandidate
-
+from anchored_coords import pick_central_anchor, relation_for_pair
+from relative_answer_determ import determine_relative_answer_for_pair
 
 @dataclass(frozen=True)
 class BenchmarkConfig:
@@ -39,6 +40,7 @@ class BenchmarkConfig:
     pre_context_sec: float = 2.0
     raw_video_width: float | None = None
     raw_video_height: float | None = None
+    relative_border_tolerance_deg: float = 10.0
 
 
 @dataclass(frozen=True)
@@ -403,6 +405,7 @@ def _load_config(path: Path) -> BenchmarkConfig:
     root = path.parent
     inputs = raw.get("inputs", {})
     video_ids = [str(v) for v in inputs.get("videos", [])]
+    relative_cfg = raw.get("relative", {})
 
     return BenchmarkConfig(
         annotations_root=(root / raw["annotations_root"]).resolve(),
@@ -423,6 +426,7 @@ def _load_config(path: Path) -> BenchmarkConfig:
         pre_context_sec=float(raw.get("pre_context_sec", 2.0)),
         raw_video_width=float(raw["raw_video_width"]) if raw.get("raw_video_width") is not None else None,
         raw_video_height=float(raw["raw_video_height"]) if raw.get("raw_video_height") is not None else None,
+        relative_border_tolerance_deg=float(relative_cfg.get("border_tolerance_deg", 10.0)),
     )
 
 
@@ -475,6 +479,19 @@ def _finalize_choices(
         rng.shuffle(final_choices)
     correct_idx = final_choices.index(correct_answer)
     return final_choices, correct_idx
+
+def _pick_step4_anchor(candidate: KeyFrameCandidate, cfg: BenchmarkConfig) -> dict[str, Any] | None:
+    anchor = pick_central_anchor(
+        video_id=candidate.video_id,
+        time_sec=candidate.query_time_sec,
+        annotations_root=cfg.annotations_root,
+        fps=cfg.fps_for_frame_lookup,
+    )
+    if anchor is None:
+        return None
+    if str(anchor["assoc_id"]) == str(candidate.assoc_id):
+        return None
+    return anchor
 
 def _build_step1_visibility(candidate: KeyFrameCandidate, object_state: Any, time_tok: str, rng) -> dict[str, Any]:
     is_visible = _is_visible_state(object_state)
@@ -634,71 +651,149 @@ def _build_step3_fixture(
         },
     }
 
-
-def classify_camera_quadrant_robust(
-    camera_coordinates,
+def _build_step4_object_object_relation(
+    candidate: KeyFrameCandidate,
+    time_tok: str,
     *,
-    center_margin=0.05,
-    depth_margin=0.05,
-    angle_margin_deg=5.0,
-):
-    if camera_coordinates is None or len(camera_coordinates) < 3:
-        return None, None, {"reason": "no_coordinates"}
-
-    x, _, z = [float(v) for v in camera_coordinates[:3]]
-
-    if abs(z) < depth_margin:
-        return None, None, {"reason": "near_z_boundary", "x": x, "z": z}
-
-    if abs(x) < center_margin:
-        return None, None, {"reason": "near_x_boundary", "x": x, "z": z}
-
-    yaw_deg = math.degrees(math.atan2(x, z))
-    if abs(abs(yaw_deg) - 90.0) < angle_margin_deg:
-        return None, None, {"reason": "near_diagonal_boundary", "yaw_deg": yaw_deg}
-
-    if z > 0:
-        if x < 0:
-            return 0, "Front-left", {"x": x, "z": z}
-        return 1, "Front-right", {"x": x, "z": z}
-    else:
-        if x < 0:
-            return 2, "Back-left", {"x": x, "z": z}
-        return 3, "Back-right", {"x": x, "z": z}
-
-
-def _build_step5_camera_quadrant(candidate, time_tok, camera_coordinates, rng):
-    correct_idx, label, debug = classify_camera_quadrant_robust(
-        camera_coordinates,
-        center_margin=0.05,
-        depth_margin=0.05,
-        angle_margin_deg=5.0,
+    anchor: dict[str, Any],
+    cfg: BenchmarkConfig,
+) -> dict[str, Any]:
+    rel_answer = determine_relative_answer_for_pair(
+        video_id=candidate.video_id,
+        time_sec=candidate.query_time_sec,
+        object_a_assoc_id=candidate.assoc_id,          # Object X = hidden target
+        object_b_assoc_id=str(anchor["assoc_id"]),     # Object Y = visible anchor
+        annotations_root=cfg.annotations_root,
+        fps=cfg.fps_for_frame_lookup,
+        border_tolerance_deg=cfg.relative_border_tolerance_deg,
     )
-    choices = list(CAMERA_QUADRANT_CHOICES)
-    if label is not None and label in choices:
-        choices, correct_idx = _finalize_choices(
-            choices=choices,
-            correct_answer=label,
-            rng=rng,
-            shuffle=True,
-        )
+
+    if rel_answer.correct_idx not in rel_answer.acceptable_idxs:
+        raise ValueError("Step 4 relation is too ambiguous near a boundary")
+
+    return {
+        "step": 4,
+        "question_class": "oos_step4_object_object_relation",
+        "question": (
+            f"At time {time_tok}, {candidate.object_name} is not visible. Based on the last known "
+            f"position of {candidate.object_name}, the marked object {anchor['name']} in the "
+            f"current frame, and the current viewing perspective, where is {anchor['name']} relative to {candidate.object_name}?"
+        ),
+        "choices": rel_answer.choices,
+        "correct_idx": rel_answer.correct_idx,
+        "acceptable_idxs": rel_answer.acceptable_idxs,
+        "answer_metadata": {
+            "object_x_assoc_id": candidate.assoc_id,
+            "object_x_name": candidate.object_name,
+            "object_y_assoc_id": str(anchor["assoc_id"]),
+            "object_y_name": str(anchor["name"]),
+            "object_y_pixel": anchor.get("pixel"),
+            "vector_object_x_relative_to_object_y": rel_answer.vector,
+        },
+    }
+
+DISTANCE_CHOICES = [
+    "very close",
+    "close",
+    "medium",
+    "far",
+]
+
+def classify_distance_bucket(distance_m: float) -> str | None:
+    if distance_m is None:
+        return None
+    if distance_m < 0.20:
+        return "very close"
+    if distance_m < 0.50:
+        return "close"
+    if distance_m < 1.00:
+        return "medium"
+    return "far"
+
+
+def _build_step5_object_object_distance(
+    candidate: KeyFrameCandidate,
+    time_tok: str,
+    *,
+    anchor: dict[str, Any],
+    cfg: BenchmarkConfig,
+    rng: random.Random,
+) -> dict[str, Any]:
+    vector = relation_for_pair(
+        video_id=candidate.video_id,
+        time_sec=candidate.query_time_sec,
+        object_a_assoc_id=candidate.assoc_id,
+        object_b_assoc_id=str(anchor["assoc_id"]),
+        annotations_root=cfg.annotations_root,
+        fps=cfg.fps_for_frame_lookup,
+    )
+
+    dx, dy, dz = [float(v) for v in vector]
+    distance_m = math.sqrt(dx * dx + dy * dy + dz * dz)
+    correct_label = classify_distance_bucket(distance_m)
+    if correct_label is None:
+        raise ValueError("Could not classify object-object distance")
+
+    choices, correct_idx = _finalize_choices(
+        choices=list(DISTANCE_CHOICES),
+        correct_answer=correct_label,
+        rng=rng,
+        shuffle=True,
+    )
 
     return {
         "step": 5,
-        "question_class": "oos_step5_camera_quadrant",
+        "question_class": "oos_step5_object_object_distance",
         "question": (
-            f"The {candidate.object_name} that was last moved was seen earlier. From where you are now at {time_tok}, "
-            f"in which direction is the target {candidate.object_name}?"
+            f"At time {time_tok}, {candidate.object_name} is not visible. Based on the last known "
+            f"position of {candidate.object_name}, and the marked object {anchor['name']} in the "
+            f"current frame, how far is {candidate.object_name} from {anchor['name']}?"
         ),
         "choices": choices,
         "correct_idx": correct_idx,
         "answer_metadata": {
-            "camera_coordinates": camera_coordinates,
-            "label": label,
-            "debug": debug,
+            "object_x_assoc_id": candidate.assoc_id,
+            "object_x_name": candidate.object_name,
+            "object_y_assoc_id": str(anchor["assoc_id"]),
+            "object_y_name": str(anchor["name"]),
+            "object_y_pixel": anchor.get("pixel"),
+            "vector_object_x_relative_to_object_y": vector,
+            "distance_m": distance_m,
+            "distance_bucket": correct_label,
         },
-        "skipped": correct_idx is None,
     }
+
+# def classify_camera_quadrant_robust(
+#     camera_coordinates,
+#     *,
+#     center_margin=0.05,
+#     depth_margin=0.05,
+#     angle_margin_deg=5.0,
+# ):
+#     if camera_coordinates is None or len(camera_coordinates) < 3:
+#         return None, None, {"reason": "no_coordinates"}
+
+#     x, _, z = [float(v) for v in camera_coordinates[:3]]
+
+#     if abs(z) < depth_margin:
+#         return None, None, {"reason": "near_z_boundary", "x": x, "z": z}
+
+#     if abs(x) < center_margin:
+#         return None, None, {"reason": "near_x_boundary", "x": x, "z": z}
+
+#     yaw_deg = math.degrees(math.atan2(x, z))
+#     if abs(abs(yaw_deg) - 90.0) < angle_margin_deg:
+#         return None, None, {"reason": "near_diagonal_boundary", "yaw_deg": yaw_deg}
+
+#     if z > 0:
+#         if x < 0:
+#             return 0, "Front-left", {"x": x, "z": z}
+#         return 1, "Front-right", {"x": x, "z": z}
+#     else:
+#         if x < 0:
+#             return 2, "Back-left", {"x": x, "z": z}
+#         return 3, "Back-right", {"x": x, "z": z}
+
 
 
 def _finalize_trajectory(
@@ -829,10 +924,25 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
                     )
                 )
 
-                step5_camera_coordinates = _state_attr(object_state, "camera_coordinates")
-                step5 = _build_step5_camera_quadrant(candidate, time_tok, step5_camera_coordinates, rng)
-                if step5.get("skipped"):
+                anchor = _pick_step4_anchor(candidate, cfg)
+                if anchor is None:
                     continue
+
+                step4 = _build_step4_object_object_relation(
+                    candidate,
+                    time_tok,
+                    anchor=anchor,
+                    cfg=cfg,
+                )
+                steps.append(step4)
+
+                step5 = _build_step5_object_object_distance(
+                    candidate,
+                    time_tok,
+                    anchor=anchor,
+                    cfg=cfg,
+                    rng=rng,
+                )
                 steps.append(step5)
 
                 key, payload = _finalize_trajectory(
