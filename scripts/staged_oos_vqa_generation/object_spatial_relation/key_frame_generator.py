@@ -398,6 +398,68 @@ def _last_stable_visible_time_before(track: ObjectVisibilityTrack, query_time_se
             last_t = t
     return last_t
 
+def _state_at_time(track: ObjectVisibilityTrack, query_time_sec: float, eps: float = 1e-6) -> dict[str, Any] | None:
+    """
+    Return this object's state at the sampled time matching query_time_sec.
+    Falls back to nearest sample if no exact match exists.
+    """
+    times = track.sampled_times_sec
+    if not times:
+        return None
+
+    best_idx = min(range(len(times)), key=lambda i: abs(float(times[i]) - float(query_time_sec)))
+    if abs(float(times[best_idx]) - float(query_time_sec)) > max(eps, 0.51 * (times[1] - times[0]) if len(times) > 1 else eps):
+        return None
+
+    return {
+        "assoc_id": track.assoc_id,
+        "name": track.name,
+        "time_sec": float(times[best_idx]),
+        "status": track.status_samples[best_idx] if best_idx < len(track.status_samples) else None,
+        "projected_pixel": track.projected_pixel_samples[best_idx] if best_idx < len(track.projected_pixel_samples) else None,
+        "world_coordinates": track.world_coordinate_samples[best_idx] if best_idx < len(track.world_coordinate_samples) else None,
+    }
+
+
+def _eligible_anchor_objects_at_time(
+    tracks: dict[str, ObjectVisibilityTrack],
+    query_time_sec: float,
+    target_assoc_id: str,
+) -> list[dict[str, Any]]:
+    """
+    Return all non-target objects that are eligible to serve as anchors at query_time_sec.
+    Anchor rule matches your step-4 selector:
+      - not the target object
+      - status in {"in_view", "observed_visible_in_open_fixture"}
+      - projected_pixel is not None
+      - world_coordinates is not None
+    """
+    eligible: list[dict[str, Any]] = []
+    for assoc_id, tr in tracks.items():
+        if str(assoc_id) == str(target_assoc_id):
+            continue
+
+        st = _state_at_time(tr, query_time_sec)
+        if st is None:
+            continue
+
+        if st["status"] not in {"in_view", "observed_visible_in_open_fixture"}:
+            continue
+        if st["projected_pixel"] is None:
+            continue
+        if st["world_coordinates"] is None:
+            continue
+
+        eligible.append(st)
+    return eligible
+
+
+def _has_valid_anchor_at_time(
+    tracks: dict[str, ObjectVisibilityTrack],
+    query_time_sec: float,
+    target_assoc_id: str,
+) -> bool:
+    return len(_eligible_anchor_objects_at_time(tracks, query_time_sec, target_assoc_id)) > 0
 
 def generate_key_frames_for_video(
     video_id: str,
@@ -523,6 +585,25 @@ def generate_key_frames_for_video(
                 continue
 
             if not (clip_start_time_sec <= last_visible_time_sec < t_sec):
+                continue
+
+            fixture = _fixture_for_object_at_time(video_id, score.assoc_id, t_sec, annotations_root)
+            if not _has_valid_anchor_at_time(
+                tracks=tracks,
+                query_time_sec=t_sec,
+                target_assoc_id=score.assoc_id,
+            ):
+                print(
+                    "[SKIP_NO_ANCHOR_AT_QUERY_TIME]",
+                    {
+                        "video_id": video_id,
+                        "assoc_id": score.assoc_id,
+                        "object_name": score.name,
+                        "query_time_sec": t_sec,
+                        "span_start_sec": span.start_sec,
+                        "span_end_sec": span.end_sec,
+                    },
+                )
                 continue
 
             fixture = _fixture_for_object_at_time(video_id, score.assoc_id, t_sec, annotations_root)

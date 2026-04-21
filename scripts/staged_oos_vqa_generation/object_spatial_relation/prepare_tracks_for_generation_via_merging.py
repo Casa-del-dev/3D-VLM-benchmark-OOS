@@ -285,8 +285,8 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-# python scripts/staged_oos_vqa_generation/object_camera_relation/prepare_tracks_for_generation_via_merging.py \
+# python scripts/staged_oos_vqa_generation/object_spatial_relation/prepare_tracks_for_generation_via_merging.py \
 #   --video_id P04-20240413-142619 \
 #   --in_view_jsonl outputs/visibility_track/P04-20240413-142619/in_view_tracks.jsonl \
 #   --visibility_jsonl outputs/visibility_track/P04-20240413-142619/visibility_track.jsonl \
-#   --output_json scripts/staged_oos_vqa_generation/object_camera_relation/outputs/merged_tracks/P04/P04-20240413-142619_merged_visibility_track.json
+#   --output_json scripts/staged_oos_vqa_generation/object_spatial_relation/outputs/merged_tracks/P04/P04-20240413-142619_merged_visibility_track.json

@@ -5,6 +5,11 @@ from pathlib import Path
 
 from in_view_determination import determine_in_view_objects, load_frame_context
 
+ANCHOR_STABLE_VISIBLE_STATUSES = {
+    "in_view",
+    "observed_visible_in_open_fixture",
+}
+
 
 @dataclass(frozen=True)
 class AnchoredRelation:
@@ -62,7 +67,18 @@ def pick_central_anchor(
 	Outputs: dict with anchor assoc_id/name/pixel, or None if no visible object exists.
 	"""
 	states = determine_in_view_objects(video_id=video_id, time_sec=time_sec, annotations_root=annotations_root, fps=fps)
-	visible = [s for s in states if s.status == "ok" and s.in_view and s.projected_pixel is not None]
+	ANCHOR_STABLE_VISIBLE_STATUSES = {
+		"in_view",
+		"observed_visible_in_open_fixture",
+	}
+
+	visible = [
+		s for s in states
+		if (
+			getattr(s, "status", None) in ANCHOR_STABLE_VISIBLE_STATUSES
+			and s.projected_pixel is not None
+		)
+	]
 	if not visible:
 		return None
 
@@ -74,6 +90,29 @@ def pick_central_anchor(
 
 	best = min(visible, key=lambda s: (s.projected_pixel[0] - cx) ** 2 + (s.projected_pixel[1] - cy) ** 2)
 	return {"assoc_id": best.assoc_id, "name": best.name, "pixel": best.projected_pixel}
+
+def relation_from_world_points(
+    video_id: str,
+    time_sec: float,
+    object_a_world: list[float],
+    object_b_world: list[float],
+    annotations_root: str | Path,
+    fps: float = 30.0,
+) -> list[float]:
+    """Return A relative to B in B-centric camera-aligned coordinates."""
+    if object_a_world is None:
+        raise ValueError("Object A has no world coordinate")
+    if object_b_world is None:
+        raise ValueError("Object B has no world coordinate")
+
+    ctx = load_frame_context(
+        video_id=video_id,
+        time_sec=time_sec,
+        annotations_root=annotations_root,
+        fps=fps,
+    )
+    T_local_world = _world_to_anchor_local(ctx.T_camera_world, object_b_world)
+    return _transform_point_3x4(T_local_world, object_a_world)
 
 
 def compute_anchored_relations(
@@ -95,10 +134,11 @@ def compute_anchored_relations(
 		raise KeyError(f"Anchor assoc_id {anchor_assoc_id} not found in video {video_id}")
 
 	anchor = by_id[anchor_assoc_id]
-	if anchor.status != "ok" or anchor.world_coordinates is None:
-		raise ValueError("Anchor object is not in a valid stable state at queried time")
-	if not bool(anchor.in_view):
-		raise ValueError("Anchor object is not visible in the queried camera frame")
+	if anchor.world_coordinates is None:
+		raise ValueError("Anchor object has no stable world coordinate at queried time")
+
+	if anchor.status not in ANCHOR_STABLE_VISIBLE_STATUSES:
+		raise ValueError("Anchor object is not stably visible in the queried camera frame")
 
 	ctx = load_frame_context(video_id=video_id, time_sec=time_sec, annotations_root=annotations_root, fps=fps)
 	T_local_world = _world_to_anchor_local(ctx.T_camera_world, anchor.world_coordinates)
