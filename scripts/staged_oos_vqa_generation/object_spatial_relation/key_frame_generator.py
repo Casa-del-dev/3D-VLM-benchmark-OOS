@@ -6,6 +6,7 @@ import math
 import random
 from typing import Any
 import json
+import re
 
 from in_view_determination import (
     DEFAULT_INTERMEDIATE_ROOT,
@@ -69,6 +70,35 @@ def _load_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
 
+def _normalize_object_name_for_ambiguity(name: str) -> str:
+    s = str(name).strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    # remove trailing digits, e.g. bowl2 -> bowl, black jar1 -> black jar
+    s = re.sub(r"\d+$", "", s).strip()
+    return s
+
+def _build_ambiguous_assoc_ids_for_video(
+    video_id: str,
+    annotations_root: str | Path,
+) -> set[str]:
+    annotations_root = Path(annotations_root)
+    assoc_info = load_json(annotations_root / "scene-and-object-movements" / "assoc_info.json")
+    video_objects: dict[str, Any] = assoc_info.get(video_id, {})
+
+    base_to_assoc_ids: dict[str, list[str]] = {}
+    for assoc_id, obj in video_objects.items():
+        raw_name = str(obj.get("name", assoc_id))
+        base = _normalize_object_name_for_ambiguity(raw_name)
+        if not base:
+            continue
+        base_to_assoc_ids.setdefault(base, []).append(str(assoc_id))
+
+    ambiguous_assoc_ids: set[str] = set()
+    for _, assoc_ids in base_to_assoc_ids.items():
+        if len(assoc_ids) > 1:
+            ambiguous_assoc_ids.update(assoc_ids)
+
+    return ambiguous_assoc_ids
 
 def load_precomputed_visibility_tracks(path: str | Path) -> dict[str, ObjectVisibilityTrack]:
     raw = _load_json(Path(path))
@@ -504,6 +534,11 @@ def generate_key_frames_for_video(
         centroid_shift_threshold_m=centroid_shift_threshold_m,
     )
 
+    # avoid ambiguious object (e.g. bowl 1 and bowl 2)
+    ambiguous_assoc_ids = _build_ambiguous_assoc_ids_for_video(
+        video_id=video_id,
+        annotations_root=annotations_root,
+    )
     any_track = next(iter(tracks.values()))
     video_start_sec = min(any_track.sampled_times_sec)
     video_end_sec = max(any_track.sampled_times_sec)
@@ -511,6 +546,17 @@ def generate_key_frames_for_video(
 
     selected: list[KeyFrameCandidate] = []
     for score in ranked:
+        # skip objects with ambiguous names to avoid confusion in the generated questions
+        if str(score.assoc_id) in ambiguous_assoc_ids:
+            print(
+                "[SKIP_AMBIGUOUS_OBJECT_NAME]",
+                {
+                    "video_id": video_id,
+                    "assoc_id": score.assoc_id,
+                    "object_name": score.name,
+                },
+            )
+            continue
         if len(selected) >= max_questions_per_video:
             break
 
