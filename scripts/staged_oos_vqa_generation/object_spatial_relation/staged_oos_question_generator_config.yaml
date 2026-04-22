@@ -14,9 +14,14 @@ pre_context_sec: 2.0
 out_of_sight_horizon_sec: 5.0
 max_questions_per_video: 30
 
-# step 2
+# step 2 last visible observation
 raw_video_width: 1408
 raw_video_height: 1408
+
+# last placement observation
+last_placement_source: raw_tracks
+#or merged tracks (accuracy depends on frame sampling rate)
+
 
 # Step 3 (fixture)
 absolute:

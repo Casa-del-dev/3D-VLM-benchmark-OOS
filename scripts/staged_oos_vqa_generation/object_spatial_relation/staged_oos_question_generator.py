@@ -19,7 +19,13 @@ from abs_answer_determ import build_fixture_vocabulary, determine_absolute_answe
 from in_view_determination import (
     DEFAULT_INTERMEDIATE_ROOT,
     determine_in_view_objects,
-    load_frame_context
+    load_frame_context,
+    choose_track_for_time,
+    get_mask_from_track,
+    load_json,
+    VideoCache,
+    transform_point,
+    project_fisheye624,
 )
 from key_frame_generator import ObjectVisibilityTrack, VisibilitySpan, KeyFrameCandidate
 from anchored_coords import relation_from_world_points
@@ -42,6 +48,7 @@ class BenchmarkConfig:
     pre_context_sec: float = 2.0
     raw_video_width: float | None = None
     raw_video_height: float | None = None
+    last_placement_source: str = "raw_tracks"  # or "merged_tracks"
 
 
 @dataclass(frozen=True)
@@ -255,12 +262,58 @@ class VisibilityTrackStore:
                 )
             idx -= 1
         return None
+    def find_last_placement_before_from_merged(
+        self,
+        video_id: str,
+        assoc_id: str,
+        query_time_sec: float,
+        clip_start_time_sec: float,
+    ) -> LastVisibleInfo | None:
+        track = self.get_track_dict(video_id).get(assoc_id)
+        if track is None:
+            return None
+
+        times = track.get("sampled_times_sec", [])
+        statuses = track.get("status_samples", [])
+        stable_visibility_samples = track.get("stable_visibility_samples", [])
+        if not times:
+            return None
+
+        idx = self._times_index(times, query_time_sec)
+        if idx is None:
+            idx = bisect.bisect_left(times, query_time_sec)
+            if idx >= len(times):
+                idx = len(times) - 1
+
+        # We want the ending position of the last completed track before query time.
+        # In sampled merged form, approximate this as the last stable non-in_motion sample
+        # before query time.
+        idx = min(idx - 1 if self._times_index(times, query_time_sec) is not None else idx, len(times) - 1)
+
+        while idx >= 0 and float(times[idx]) >= clip_start_time_sec - 1e-9:
+            status = str(self._list_value(statuses, idx) or "")
+            is_stable = bool(self._list_value(stable_visibility_samples, idx))
+            if is_stable and status != "in_motion":
+                return LastVisibleInfo(
+                    sampled_time_sec=float(times[idx]),
+                    projected_pixel=self._list_value(track.get("projected_pixel_samples", []), idx),
+                    camera_coordinates=self._list_value(track.get("camera_coordinate_samples", []), idx),
+                    frame_index=self._list_value(track.get("frame_index_samples", []), idx),
+                    status=status or "stable_sample",
+                    fixture=self._list_value(track.get("fixture_samples", []), idx),
+                    world_coordinates=self._list_value(track.get("world_coordinate_samples", []), idx),
+                    reference_source="merged_tracks_last_stable_sample_before_query",
+                )
+            idx -= 1
+
+        return None
 
 
 class RuntimeCaches:
     def __init__(self, cfg: BenchmarkConfig, visibility_store: VisibilityTrackStore | None = None):
         self.cfg = cfg
         self.visibility_store = visibility_store or VisibilityTrackStore(None)
+        self._video_cache_by_video: dict[str, VideoCache] = {}
 
     @staticmethod
     def _norm_time(time_sec: float) -> float:
@@ -288,6 +341,18 @@ class RuntimeCaches:
                 return states
 
         return self.live_states_by_assoc_id(video_id, time_sec)
+    def video_cache(self, video_id: str) -> VideoCache:
+        cached = self._video_cache_by_video.get(video_id)
+        if cached is not None:
+            return cached
+
+        built = VideoCache.build(
+            video_id=video_id,
+            annotations_root=self.cfg.annotations_root,
+            intermediate_root=self.cfg.intermediate_root,
+        )
+        self._video_cache_by_video[video_id] = built
+        return built
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -378,6 +443,134 @@ def _find_last_visible_info(
         t -= step
     return None
 
+def _project_world_point_to_query_frame(
+    *,
+    video_id: str,
+    query_time_sec: float,
+    world_coordinates: list[float] | None,
+    cfg: BenchmarkConfig,
+    caches: RuntimeCaches,
+) -> tuple[list[float] | None, list[float] | None]:
+    if world_coordinates is None:
+        return None, None
+
+    cache = caches.video_cache(video_id)
+    ctx = load_frame_context(
+        video_id=video_id,
+        time_sec=query_time_sec,
+        annotations_root=cfg.annotations_root,
+        fps=cfg.fps_for_frame_lookup,
+        intermediate_root=cfg.intermediate_root,
+        cache=cache,
+    )
+
+    cam_xyz = transform_point(ctx.T_camera_world, world_coordinates)
+    pixel_xy, _, valid = (
+        project_fisheye624(cam_xyz, ctx.projection_params)
+        if ctx.model_name == "CameraModelType.FISHEYE624"
+        else (None, cam_xyz[2], False)
+    )
+    projected = pixel_xy if valid else None
+    return projected, [float(v) for v in cam_xyz]
+
+def _project_world_point_at_time(
+    *,
+    video_id: str,
+    time_sec: float,
+    world_coordinates: list[float] | None,
+    cfg: BenchmarkConfig,
+    caches: RuntimeCaches,
+) -> tuple[list[float] | None, list[float] | None, int | None]:
+    if world_coordinates is None:
+        return None, None, None
+
+    cache = caches.video_cache(video_id)
+    ctx = load_frame_context(
+        video_id=video_id,
+        time_sec=time_sec,
+        annotations_root=cfg.annotations_root,
+        fps=cfg.fps_for_frame_lookup,
+        intermediate_root=cfg.intermediate_root,
+        cache=cache,
+    )
+
+    cam_xyz = transform_point(ctx.T_camera_world, world_coordinates)
+    pixel_xy, _, valid = (
+        project_fisheye624(cam_xyz, ctx.projection_params)
+        if ctx.model_name == "CameraModelType.FISHEYE624"
+        else (None, cam_xyz[2], False)
+    )
+    projected = pixel_xy if valid else None
+    return projected, [float(v) for v in cam_xyz], int(ctx.frame_index)
+
+def _find_last_placement_info_raw(
+    candidate: KeyFrameCandidate,
+    cfg: BenchmarkConfig,
+    caches: RuntimeCaches,
+) -> LastVisibleInfo | None:
+    cache = caches.video_cache(candidate.video_id)
+    obj = cache.assoc_objects.get(candidate.assoc_id)
+    if obj is None:
+        return None
+
+    track, mode, _ = choose_track_for_time(obj.get("tracks", []), candidate.query_time_sec)
+    if track is None or mode != "past":
+        return None
+
+    mask = get_mask_from_track(cache.mask_info_video, track, pick="latest")
+    if mask is None:
+        return None
+
+    frame_index = mask.get("frame_number")
+    placement_time_sec = (
+        float(frame_index) / float(cfg.fps_for_frame_lookup)
+        if frame_index is not None
+        else float(track["time_segment"][1])
+    )
+    world_coordinates = mask.get("3d_location")
+    projected_pixel, camera_coordinates, projected_frame_index = _project_world_point_at_time(
+        video_id=candidate.video_id,
+        time_sec=placement_time_sec,
+        world_coordinates=world_coordinates,
+        cfg=cfg,
+        caches=caches,
+    )
+
+    return LastVisibleInfo(
+        sampled_time_sec=placement_time_sec,
+        projected_pixel=projected_pixel,
+        camera_coordinates=camera_coordinates,
+        frame_index=int(frame_index) if frame_index is not None else None,
+        status="last_past_track_end",
+        fixture=mask.get("fixture"),
+        world_coordinates=[float(v) for v in world_coordinates] if world_coordinates is not None else None,
+        reference_source="raw_assoc_info_mask_info_latest_mask_of_last_past_track",
+    )
+
+def _find_last_placement_info(
+    candidate: KeyFrameCandidate,
+    cfg: BenchmarkConfig,
+    caches: RuntimeCaches,
+) -> LastVisibleInfo | None:
+    source = str(cfg.last_placement_source).strip().lower()
+
+    if source == "raw_tracks":
+        return _find_last_placement_info_raw(candidate, cfg, caches)
+
+    if source == "merged_tracks":
+        if caches.visibility_store.has_video(candidate.video_id):
+            return caches.visibility_store.find_last_placement_before_from_merged(
+                video_id=candidate.video_id,
+                assoc_id=candidate.assoc_id,
+                query_time_sec=candidate.query_time_sec,
+                clip_start_time_sec=candidate.clip_start_time_sec,
+            )
+        return None
+
+    raise ValueError(
+        f"Unsupported last_placement_source={cfg.last_placement_source!r}. "
+        "Use 'raw_tracks' or 'merged_tracks'."
+    )
 
 def _parse_visibility_tracks_json(
     raw_value: Any,
@@ -408,6 +601,7 @@ def _parse_visibility_tracks_json(
     )
 
 
+
 def _load_config(path: Path) -> BenchmarkConfig:
     raw = _load_yaml(path)
     root = path.parent
@@ -433,6 +627,7 @@ def _load_config(path: Path) -> BenchmarkConfig:
         pre_context_sec=float(raw.get("pre_context_sec", 2.0)),
         raw_video_width=float(raw["raw_video_width"]) if raw.get("raw_video_width") is not None else None,
         raw_video_height=float(raw["raw_video_height"]) if raw.get("raw_video_height") is not None else None,
+        last_placement_source=str(raw.get("last_placement_source", "raw_tracks")),
     )
 
 
@@ -534,8 +729,9 @@ def _pick_branch_anchor(
     return {
         "assoc_id": str(best["assoc_id"]),
         "name": str(best.get("name", best["assoc_id"])),
-        "pixel": best.get("projected_pixel"),
+        "projected_pixel": best.get("projected_pixel"),
         "world_coordinates": best.get("world_coordinates"),
+        "camera_coordinates": best.get("camera_coordinates"),
         "status": best.get("status"),
         "reference_source": "precomputed_visibility_track"
             if caches.visibility_store.has_video(candidate.video_id)
@@ -612,15 +808,56 @@ def _build_step2_last_visible(
         },
     }
 
+def _build_step3_last_placement(
+    candidate: KeyFrameCandidate,
+    time_tok: str,
+    last_placement: LastVisibleInfo,
+    cfg: BenchmarkConfig,
+) -> dict[str, Any]:
+    normalized_projected_pixel = _normalize_projected_pixel(
+        last_placement.projected_pixel,
+        cfg.raw_video_width,
+        cfg.raw_video_height,
+    )
+    last_placement_time_token = _time_token(last_placement.sampled_time_sec, input_key="video 1")
 
-def _is_invalid_step3_fixture_label(label: str | None) -> bool:
+    return {
+        "step": "3",
+        "question_class": "oos_step3_last_placement",
+        "question": (
+            f"At the current time {time_tok}, when was the target {candidate.object_name} last placed, "
+            f"and where was it placed?"
+        ),
+        "choices": [],
+        "correct_idx": None,
+        "answer_metadata": {
+            "last_placement_time_sec": last_placement.sampled_time_sec,
+            "last_placement_time_in_clip_sec": last_placement.sampled_time_sec - candidate.clip_start_time_sec,
+            "last_placement_time_token": last_placement_time_token,
+            "projected_pixel": last_placement.projected_pixel,
+            "normalized_projected_pixel": normalized_projected_pixel,
+            "camera_coordinates": last_placement.camera_coordinates,
+            "frame_index": last_placement.frame_index,
+            "status": last_placement.status,
+            "fixture": last_placement.fixture,
+            "world_coordinates": last_placement.world_coordinates,
+            "reference_source": last_placement.reference_source,
+            "note": (
+                "Uses exact past-track end position when last_placement_source=raw_tracks, "
+                "or a sampled approximation from merged tracks when "
+                "last_placement_source=merged_tracks."
+            ),
+        },
+    }
+
+def _is_invalid_step4_fixture_label(label: str | None) -> bool:
     if label is None:
         return True
     normalized = str(label).strip().lower()
     return normalized in {"", "mid-air"}
 
 
-def _build_step3_fixture(
+def _build_step4_fixture(
     candidate: KeyFrameCandidate,
     time_tok: str,
     *,
@@ -633,16 +870,16 @@ def _build_step3_fixture(
         correct_fixture = semantic_fixture_name(last_visible.fixture)
         if not correct_fixture:
             raise ValueError(f"Could not normalize fixture {last_visible.fixture!r}")
-        if _is_invalid_step3_fixture_label(correct_fixture):
+        if _is_invalid_step4_fixture_label(correct_fixture):
             raise ValueError(
                 f"Fixture label {last_visible.fixture!r} normalized to {correct_fixture!r} "
-                "is not valid for step 3 question."
+                "is not valid for step 4 question."
             )
 
         distractors = sorted({
             str(f)
             for f in fixture_vocab
-            if str(f) and str(f) != correct_fixture and not _is_invalid_step3_fixture_label(str(f))
+            if str(f) and str(f) != correct_fixture and not _is_invalid_step4_fixture_label(str(f))
         })
 
         if len(distractors) < cfg.absolute_num_choices - 1:
@@ -656,8 +893,8 @@ def _build_step3_fixture(
         rng.shuffle(choices)
 
         return {
-            "step": 3,
-            "question_class": "oos_step3_fixture",
+            "step": 4,
+            "question_class": "oos_step4_fixture",
             "question": (
                 f"At the current time {time_tok}, based on the last placement of the target "
                 f"{candidate.object_name} that was moved earlier, which nearby fixture is closest to it?"
@@ -681,12 +918,12 @@ def _build_step3_fixture(
         fixture_vocabulary=fixture_vocab,
         rng=rng,
     )
-    if _is_invalid_step3_fixture_label(abs_answer.correct_fixture):
-        raise ValueError(f"Invalid step 3 fixture answer: {abs_answer.correct_fixture!r}")
+    if _is_invalid_step4_fixture_label(abs_answer.correct_fixture):
+        raise ValueError(f"Invalid step 4 fixture answer: {abs_answer.correct_fixture!r}")
 
     return {
-        "step": 3,
-        "question_class": "oos_step3_fixture",
+        "step": 4,
+        "question_class": "oos_step4_fixture",
         "question": (
             f"At the current time {time_tok}, based on the last placement of the target "
             f"{candidate.object_name} that was moved earlier, which nearby fixture or landmark is closest to it?"
@@ -732,16 +969,43 @@ def classify_camera_quadrant_robust(
             return 2, "Back-left", {"x": x, "z": z}
         return 3, "Back-right", {"x": x, "z": z}
 
+def _require_query_time_target_state(
+    candidate: KeyFrameCandidate,
+    caches: RuntimeCaches,
+) -> dict[str, Any]:
+    states = caches.states_by_assoc_id(candidate.video_id, candidate.query_time_sec)
+    state = states.get(candidate.assoc_id)
+    if state is None:
+        raise ValueError(
+            f"No query-time state found for assoc_id={candidate.assoc_id} "
+            f"at t={candidate.query_time_sec:.3f}"
+        )
+
+    if not isinstance(state, dict):
+        # normalize ObjectState -> dict fallback
+        state = {
+            "assoc_id": candidate.assoc_id,
+            "name": getattr(state, "name", candidate.object_name),
+            "status": getattr(state, "status", None),
+            "is_visible": getattr(state, "in_view", None),
+            "projected_pixel": getattr(state, "projected_pixel", None),
+            "camera_coordinates": getattr(state, "camera_coordinates", None),
+            "world_coordinates": getattr(state, "world_coordinates", None),
+            "frame_number": getattr(state, "frame_number", None),
+            "fixture": getattr(state, "fixture", None),
+        }
+
+    return state
 
 def _build_branch_object_camera_relative_position(
     candidate: KeyFrameCandidate,
     time_tok: str,
     *,
-    last_visible: LastVisibleInfo,
+    target_state_at_query: dict[str, Any],
     rng: random.Random,
 ) -> dict[str, Any]:
     correct_idx, label, debug = classify_camera_quadrant_robust(
-        last_visible.camera_coordinates,
+        target_state_at_query.get("camera_coordinates"),
         center_margin=0.05,
         depth_margin=0.05,
         angle_margin_deg=5.0,
@@ -756,9 +1020,9 @@ def _build_branch_object_camera_relative_position(
         )
 
     return {
-        "step": "4a",
+        "step": "5a",
         "depends_on_steps": [1, 2, 3],
-        "branch_group": "post_step3",
+        "branch_group": "post_step4",
         "question_class": "oos_branch_object_camera_relative_position",
         "question": (
             f"At the current time {time_tok}, the target {candidate.object_name} is not visible. "
@@ -768,18 +1032,20 @@ def _build_branch_object_camera_relative_position(
         "choices": choices,
         "correct_idx": correct_idx,
         "answer_metadata": {
-            "reference_time_sec": last_visible.sampled_time_sec,
-            "camera_coordinates": last_visible.camera_coordinates,
+            "reference_time_sec": candidate.query_time_sec,
+            "camera_coordinates": target_state_at_query.get("camera_coordinates"),
+            "world_coordinates": target_state_at_query.get("world_coordinates"),
+            "status": target_state_at_query.get("status"),
             "correct_label": label,
             "debug": debug,
-            "reference_source": last_visible.reference_source,
+            "reference_source": "query_time_state_from_merged_tracks_or_live_state",
         },
         "skipped": correct_idx is None,
     }
 
-def log_step4_failure(reason: str, context: dict[str, Any]) -> None:
+def log_step5_failure(reason: str, context: dict[str, Any]) -> None:
     record = {"reason": reason, **context}
-    print(f"[STEP4 DEBUG] {json.dumps(record, ensure_ascii=False)}")
+    print(f"[STEP5 DEBUG] {json.dumps(record, ensure_ascii=False)}")
 
 
 def _build_branch_object_object_relation(
@@ -787,18 +1053,18 @@ def _build_branch_object_object_relation(
     time_tok: str,
     *,
     anchor: dict[str, Any],
-    last_visible: LastVisibleInfo,
+    target_state_at_query: dict[str, Any],
     cfg: BenchmarkConfig,
 ) -> dict[str, Any]:
-    if last_visible.world_coordinates is None:
-        raise ValueError("Last visible target state has no world coordinates")
+    if target_state_at_query.get("world_coordinates") is None:
+        raise ValueError("Query-time target state has no world coordinates")
     if anchor.get("world_coordinates") is None:
         raise ValueError("Anchor has no world coordinates")
 
     vector = relation_from_world_points(
         video_id=candidate.video_id,
         time_sec=candidate.query_time_sec,
-        object_a_world=last_visible.world_coordinates,
+        object_a_world=target_state_at_query["world_coordinates"],
         object_b_world=anchor["world_coordinates"],
         annotations_root=cfg.annotations_root,
         fps=cfg.fps_for_frame_lookup,
@@ -807,9 +1073,9 @@ def _build_branch_object_object_relation(
     rel_answer = determine_relative_answer_from_vector(vector)
 
     return {
-        "step": "4b",
+        "step": "5b",
         "depends_on_steps": [1, 2, 3],
-        "branch_group": "post_step3",
+        "branch_group": "post_step4",
         "question_class": "oos_branch_object_object_relation",
         "question": (
             f"At time {time_tok}, the target {candidate.object_name} is not visible. "
@@ -823,16 +1089,16 @@ def _build_branch_object_object_relation(
         "answer_metadata": {
             "object_x_assoc_id": candidate.assoc_id,
             "object_x_name": candidate.object_name,
-            "object_x_reference_time_sec": last_visible.sampled_time_sec,
-            "object_x_status": last_visible.status,
-            "object_x_reference_source": last_visible.reference_source,
-            "object_y_assoc_id": str(anchor["assoc_id"]),
-            "object_y_name": str(anchor["name"]),
-            "object_y_pixel": anchor.get("projected_pixel"),
-            "object_y_status": anchor.get("status"),
-            "object_y_reference_source": anchor.get("reference_source"),
-            "vector_object_x_relative_to_object_y": rel_answer.vector,
-            "correct_label": rel_answer.choices[rel_answer.correct_idx],
+            "object_x_reference_time_sec": candidate.query_time_sec,
+            "object_x_status": target_state_at_query.get("status"),
+            "object_x_world_coordinates": target_state_at_query.get("world_coordinates"),
+            "object_x_camera_coordinates": target_state_at_query.get("camera_coordinates"),
+            "object_y_assoc_id": anchor["assoc_id"],
+            "object_y_name": anchor["name"],
+            "object_y_reference_time_sec": candidate.query_time_sec,
+            "object_y_world_coordinates": anchor["world_coordinates"],
+            "object_y_projected_pixel": anchor.get("projected_pixel"),
+            "reference_source": "query_time_state_from_merged_tracks_or_live_state",
         },
     }
 
@@ -855,19 +1121,19 @@ def _build_branch_object_object_distance(
     time_tok: str,
     *,
     anchor: dict[str, Any],
-    last_visible: LastVisibleInfo,
+    target_state_at_query: dict[str, Any],
     cfg: BenchmarkConfig,
     rng: random.Random,
 ) -> dict[str, Any]:
-    if last_visible.world_coordinates is None:
-        raise ValueError("Last visible target state has no world coordinates")
+    if target_state_at_query.get("world_coordinates") is None:
+        raise ValueError("Target state at query has no world coordinates")
     if anchor.get("world_coordinates") is None:
         raise ValueError("Anchor has no world coordinates")
 
     vector = relation_from_world_points(
         video_id=candidate.video_id,
         time_sec=candidate.query_time_sec,
-        object_a_world=last_visible.world_coordinates,
+        object_a_world=target_state_at_query["world_coordinates"],
         object_b_world=anchor["world_coordinates"],
         annotations_root=cfg.annotations_root,
         fps=cfg.fps_for_frame_lookup,
@@ -887,9 +1153,9 @@ def _build_branch_object_object_distance(
     )
 
     return {
-        "step": "4c",
+        "step": "5c",
         "depends_on_steps": [1, 2, 3],
-        "branch_group": "post_step3",
+        "branch_group": "post_step4",
         "question_class": "oos_branch_object_object_distance",
         "question": (
             f"At time {time_tok}, {candidate.object_name} is not visible. Based on the last known "
@@ -901,8 +1167,8 @@ def _build_branch_object_object_distance(
         "answer_metadata": {
             "object_x_assoc_id": candidate.assoc_id,
             "object_x_name": candidate.object_name,
-            "object_x_reference_time_sec": last_visible.sampled_time_sec,
-            "object_x_status_from_track": last_visible.status,
+            "object_x_reference_time_sec": candidate.query_time_sec,
+            "object_x_status_from_track": target_state_at_query.get("status"),
             "object_y_assoc_id": str(anchor["assoc_id"]),
             "object_y_name": str(anchor["name"]),
             "object_y_pixel": anchor.get("projected_pixel"),
@@ -911,7 +1177,7 @@ def _build_branch_object_object_distance(
             "distance_m": distance_m,
             "distance_bucket": correct_label,
             "reference_source": {
-                "object_x": last_visible.reference_source,
+                "object_x": target_state_at_query.get("reference_source"),
                 "object_y": anchor.get("reference_source"),
             },
         },
@@ -1139,12 +1405,16 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
                 if last_visible.fixture is not None:
                     candidate_fixture = semantic_fixture_name(last_visible.fixture)
 
-                if candidate_fixture is not None and _is_invalid_step3_fixture_label(candidate_fixture):
+                if candidate_fixture is not None and _is_invalid_step4_fixture_label(candidate_fixture):
                     continue
 
                 incremental_steps.append(_build_step2_last_visible(candidate, time_tok, last_visible, cfg))
+                last_placement = _find_last_placement_info(candidate, cfg, caches)
+                if last_placement is None:
+                    continue
+                incremental_steps.append(_build_step3_last_placement(candidate, time_tok, last_placement, cfg))
                 incremental_steps.append(
-                    _build_step3_fixture(
+                    _build_step4_fixture(
                         candidate,
                         time_tok,
                         last_visible=last_visible,
@@ -1153,11 +1423,12 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
                         cfg=cfg,
                     )
                 )
-
+                
+                target_state_at_query = _require_query_time_target_state(candidate, caches)
                 branch_camera = _build_branch_object_camera_relative_position(
                     candidate,
                     time_tok,
-                    last_visible=last_visible,
+                    target_state_at_query=target_state_at_query,
                     rng=rng,
                 )
                 if not branch_camera.get("skipped", False):
@@ -1165,7 +1436,7 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
 
                 anchor = _pick_step4_anchor(candidate, cfg, caches)
                 if anchor is None:
-                    log_step4_failure(
+                    log_step5_failure(
                         "no_anchor",
                         {
                             "video_id": candidate.video_id,
@@ -1176,17 +1447,17 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
                     )
                 else:
                     try:
-                        step4b = _build_branch_object_object_relation(
+                        step5b = _build_branch_object_object_relation(
                             candidate,
                             time_tok,
                             anchor=anchor,
-                            last_visible=last_visible,
+                            target_state_at_query=target_state_at_query,
                             cfg=cfg,
                         )
-                        branch_steps.append(step4b)
+                        branch_steps.append(step5b)
                     except Exception as e:
                         print(
-                            "[4B_FAIL]",
+                            "[5B_FAIL]",
                             {
                                 "t": candidate.query_time_sec,
                                 "obj": candidate.assoc_id,
@@ -1196,18 +1467,18 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
                         )
 
                     try:
-                        step4c = _build_branch_object_object_distance(
+                        step5c = _build_branch_object_object_distance(
                             candidate,
                             time_tok,
                             anchor=anchor,
-                            last_visible=last_visible,
+                            target_state_at_query=target_state_at_query,
                             rng=rng,
                             cfg=cfg,
                         )
-                        branch_steps.append(step4c)
+                        branch_steps.append(step5c)
                     except Exception as e:
                         print(
-                            "[4C_FAIL]",
+                            "[5C_FAIL]",
                             {
                                 "t": candidate.query_time_sec,
                                 "obj": candidate.assoc_id,

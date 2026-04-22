@@ -10,3 +10,4 @@ tracks.json
 in_view_output.yaml
 scripts/staged_oos_vqa_generation/object_spatial_relation/outputs/
 scripts/outputs/
+HD-EPIC/

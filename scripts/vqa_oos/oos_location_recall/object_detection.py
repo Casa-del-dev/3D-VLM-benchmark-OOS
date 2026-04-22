@@ -6,7 +6,7 @@ from groundingdino_roi_visibility import (
     TemporalSmoother,
 )
 
-image = cv2.imread("/Users/fangzhouma/Desktop/3d_vision/3D-VLM-benchmark-OOS/data/for_debug/time_208.jpg")
+image = cv2.imread("/Users/fangzhouma/Desktop/3d_vision/3D-VLM-benchmark-OOS/data/for_debug/time_6.jpg")
 
 if image is None:
     raise FileNotFoundError("Failed to load input image.")
@@ -17,25 +17,25 @@ detector = GroundingDINODetector(
 
 estimator = ROIGroundingDINOVisibilityEstimator(
     detector=detector,
-    roi_scale=1.2,
-    box_threshold=0.30,
-    text_threshold=0.25,
+    roi_scale=1.8,
+    box_threshold=0.4,
+    text_threshold=0.4,
     visible_threshold=0.62,
     partial_threshold=0.28,
-    smoother=TemporalSmoother(alpha=0.6),
+    smoother=None,
 )
 
-projected_uv = (604.697959, 1021.778181)
-text_prompt = ["a small plate"]
+projected_uv = (408.3171177561637, 528.5396005453204)
+text_prompt = ["a pot in the fridge"]
 
 result, debug = estimator.estimate(
     image_bgr=image,
     projected_uv=projected_uv,
     text_prompt=text_prompt,
     expected_box_size_px=(120, 120),
-    uncertainty_px=10,
+    uncertainty_px=40,
     draw_debug=True,
-    last_seen_bbox=[912.191, 859.24103, 1010.8720000000001, 890.53]
+    last_seen_bbox= [584.86154, 568.01368, 909.78462, 758.15385]
 )
 
 print(result.label)

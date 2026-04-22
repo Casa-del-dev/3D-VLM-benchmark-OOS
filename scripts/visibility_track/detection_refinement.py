@@ -188,18 +188,31 @@ def _sample_detection(
             "label": "skipped",
             "score": None,
             "reason": "not a valid in-view sample",
+            "mask_bbox": None,
+            "expected_box_size_px": None,
+            "roi_bbox_xyxy": None,
         }
 
     frame = frame_reader.read_at(time_sec)
     if frame is None:
-        return {"time_sec": time_sec, "label": "skipped", "score": None, "reason": "frame read failed"}
+        return {
+            "time_sec": time_sec,
+            "label": "skipped",
+            "score": None,
+            "reason": "frame read failed",
+            "mask_bbox": None,
+            "expected_box_size_px": None,
+            "roi_bbox_xyxy": None,
+        }
 
     if state.mask_bbox is not None:
         x1, y1, x2, y2 = state.mask_bbox
         expected_size = (max(1.0, float(x2 - x1)), max(1.0, float(y2 - y1)))
+        mask_bbox = [float(x1), float(y1), float(x2), float(y2)]
     else:
         d = float(det_cfg.default_expected_size_px)
         expected_size = (d, d)
+        mask_bbox = None
 
     result, _ = estimator.estimate(
         image_bgr=frame,
@@ -208,11 +221,15 @@ def _sample_detection(
         expected_box_size_px=expected_size,
         uncertainty_px=det_cfg.uncertainty_px,
     )
+
     return {
         "time_sec": time_sec,
         "label": result.label,
         "score": float(result.visibility_score),
         "projected_uv": list(state.projected_pixel),
+        "mask_bbox": mask_bbox,
+        "expected_box_size_px": [float(expected_size[0]), float(expected_size[1])],
+        "roi_bbox_xyxy": [result.roi.x1, result.roi.y1, result.roi.x2, result.roi.y2],
     }
 
 
@@ -262,7 +279,7 @@ def _refine_candidate(
     ]
 
     tested = [row for row in samples if row["label"] != "skipped"]
-    positive = [row for row in tested if row["label"] in {"visible", "partially_visible"}]
+    positive = [row for row in tested if row["label"] in {"visible"}]
 
     if positive:
         status = OBSERVED_VISIBLE

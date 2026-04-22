@@ -4,9 +4,15 @@
 # (`scripts/visibility_track/`). Use absolute paths if the repo layout differs.
 
 # --- Dataset paths -----------------------------------------------------------
-annotations_root: ../../../hd-epic-annotations
-data_root: ../../../.
-intermediate_data_root: ../../../hd-epic-annotations/Intermediate_data
+#Ivo's local paths below:
+# annotations_root: ../../../hd-epic-annotations
+# data_root: ../../../.
+# intermediate_data_root: ../../../hd-epic-annotations/Intermediate_data
+
+annotations_root: ../../hd-epic-annotations
+data_root: ../../data
+intermediate_data_root: ../../hd-epic-annotations/Intermediate_data
+
 
 # --- What to process ---------------------------------------------------------
 inputs:
@@ -34,13 +40,13 @@ geometric_occlusion:
 # --- Object detection (Grounding DINO) ---------------------------------------
 object_detection:
   enabled: true
-  model_id: IDEA-Research/grounding-dino-tiny
-  roi_scale: 2.0
-  box_threshold: 0.30
-  text_threshold: 0.25
-  visible_threshold: 0.62
+  model_id: IDEA-Research/grounding-dino-base
+  roi_scale: 1.5
+  box_threshold: 0.40
+  text_threshold: 0.30
+  visible_threshold: 0.82
   partial_threshold: 0.28
-  uncertainty_px: 40
+  uncertainty_px: 20
   # Pixel fallback when the projected object has no known bbox size.
   default_expected_size_px: 120
 

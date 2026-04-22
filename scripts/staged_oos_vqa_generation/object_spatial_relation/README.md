@@ -200,7 +200,7 @@ far : > 2m
 
 ```bash
 python scripts/staged_oos_vqa_generation/object_spatial_relation/visualize_staged_oos_vqa.py \
-  --questions outputs/generated_vqa/P04-20240413-142619_vqa.json \
+  --questions scripts/staged_oos_vqa_generation/object_spatial_relation/outputs/generated_vqa/P04-20240413-142619_vqa.json \
   --video data/HD-EPIC/Videos/P04/P04-20240413-142619.mp4 \
   --output_dir scripts/staged_oos_vqa_generation/object_spatial_relation/outputs/visualizations
 ```

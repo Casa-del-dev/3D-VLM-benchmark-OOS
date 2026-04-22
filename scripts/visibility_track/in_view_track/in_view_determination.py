@@ -346,6 +346,8 @@ def determine_in_view_objects(
 	out: list[ObjectState] = []
 
 	for assoc_id, obj in ctx.assoc_objects.items():
+		if "(skipped)" in obj["name"]:
+			continue
 		track, mode, next_time = choose_track_for_time(obj["tracks"], time_sec)
 		if track is None:
 			out.append(
