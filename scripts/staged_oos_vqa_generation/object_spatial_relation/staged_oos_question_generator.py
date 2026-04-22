@@ -1425,70 +1425,90 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
                 )
                 
                 target_state_at_query = _require_query_time_target_state(candidate, caches)
+
+                # 5a must be unambiguous, otherwise drop whole trajectory
                 branch_camera = _build_branch_object_camera_relative_position(
                     candidate,
                     time_tok,
                     target_state_at_query=target_state_at_query,
                     rng=rng,
                 )
-                if not branch_camera.get("skipped", False):
-                    branch_steps.append(branch_camera)
-
-                anchor = _pick_step4_anchor(candidate, cfg, caches)
-                if anchor is None:
-                    log_step5_failure(
-                        "no_anchor",
+                if branch_camera.get("skipped", False):
+                    print(
+                        "[DROP_TRAJECTORY_AMBIGUOUS_5A]",
                         {
                             "video_id": candidate.video_id,
                             "assoc_id": candidate.assoc_id,
-                            "query_time": candidate.query_time_sec,
-                            "last_visible_world": last_visible.world_coordinates if last_visible else None,
+                            "object_name": candidate.object_name,
+                            "query_time_sec": candidate.query_time_sec,
+                            "camera_coordinates": target_state_at_query.get("camera_coordinates"),
+                            "debug": branch_camera.get("answer_metadata", {}).get("debug"),
                         },
                     )
-                else:
-                    try:
-                        step5b = _build_branch_object_object_relation(
-                            candidate,
-                            time_tok,
-                            anchor=anchor,
-                            target_state_at_query=target_state_at_query,
-                            cfg=cfg,
-                        )
-                        branch_steps.append(step5b)
-                    except Exception as e:
-                        print(
-                            "[5B_FAIL]",
-                            {
-                                "t": candidate.query_time_sec,
-                                "obj": candidate.assoc_id,
-                                "anchor": anchor.get("assoc_id") if anchor else None,
-                                "err": str(e),
-                            },
-                        )
-
-                    try:
-                        step5c = _build_branch_object_object_distance(
-                            candidate,
-                            time_tok,
-                            anchor=anchor,
-                            target_state_at_query=target_state_at_query,
-                            rng=rng,
-                            cfg=cfg,
-                        )
-                        branch_steps.append(step5c)
-                    except Exception as e:
-                        print(
-                            "[5C_FAIL]",
-                            {
-                                "t": candidate.query_time_sec,
-                                "obj": candidate.assoc_id,
-                                "anchor": anchor.get("assoc_id") if anchor else None,
-                                "err": str(e),
-                            },
-                        )
-
-                if not branch_steps:
                     continue
+                branch_steps.append(branch_camera)
+
+                # Anchor is required for 5b/5c, otherwise drop whole trajectory
+                anchor = _pick_step4_anchor(candidate, cfg, caches)
+                if anchor is None:
+                    print(
+                        "[DROP_TRAJECTORY_NO_ANCHOR]",
+                        {
+                            "video_id": candidate.video_id,
+                            "assoc_id": candidate.assoc_id,
+                            "object_name": candidate.object_name,
+                            "query_time_sec": candidate.query_time_sec,
+                        },
+                    )
+                    continue
+
+                try:
+                    step5b = _build_branch_object_object_relation(
+                        candidate,
+                        time_tok,
+                        anchor=anchor,
+                        target_state_at_query=target_state_at_query,
+                        cfg=cfg,
+                    )
+                except Exception as e:
+                    print(
+                        "[DROP_TRAJECTORY_5B_FAIL]",
+                        {
+                            "video_id": candidate.video_id,
+                            "assoc_id": candidate.assoc_id,
+                            "object_name": candidate.object_name,
+                            "query_time_sec": candidate.query_time_sec,
+                            "anchor_assoc_id": anchor.get("assoc_id"),
+                            "err": str(e),
+                        },
+                    )
+                    continue
+
+                try:
+                    step5c = _build_branch_object_object_distance(
+                        candidate,
+                        time_tok,
+                        anchor=anchor,
+                        target_state_at_query=target_state_at_query,
+                        rng=rng,
+                        cfg=cfg,
+                    )
+                except Exception as e:
+                    print(
+                        "[DROP_TRAJECTORY_5C_FAIL]",
+                        {
+                            "video_id": candidate.video_id,
+                            "assoc_id": candidate.assoc_id,
+                            "object_name": candidate.object_name,
+                            "query_time_sec": candidate.query_time_sec,
+                            "anchor_assoc_id": anchor.get("assoc_id"),
+                            "err": str(e),
+                        },
+                    )
+                    continue
+
+                branch_steps.append(step5b)
+                branch_steps.append(step5c)
 
                 key, payload = _finalize_trajectory(
                     trajectory_id,
