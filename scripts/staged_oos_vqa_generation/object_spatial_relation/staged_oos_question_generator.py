@@ -13,6 +13,8 @@ import random
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 from typing import Any
+import numpy as np
+
 
 import key_frame_generator as kfg
 from abs_answer_determ import build_fixture_vocabulary, determine_absolute_answer, semantic_fixture_name
@@ -937,37 +939,119 @@ def _build_step4_fixture(
         },
     }
 
+## Step 5A and 5B are combined into a single more robust question that classifies the camera position into one of four quadrants or returns "uncertain" if the position is near a boundary or not available.
+from pathlib import Path
+import numpy as np
+from anchored_coords import _transform_point_3x4
+def _world_to_camera_for_step5a(
+    *,
+    video_id: str,
+    time_sec: float,
+    world_coordinates: list[float] | None,
+    annotations_root,
+    fps: float,
+) -> list[float] | None:
+    if world_coordinates is None:
+        return None
 
-def classify_camera_quadrant_robust(
+    ctx = load_frame_context(
+        video_id=video_id,
+        time_sec=time_sec,
+        annotations_root=annotations_root,
+        fps=fps,
+    )
+
+    return _transform_point_3x4(ctx.T_camera_world, world_coordinates)
+
+def classify_camera_left_right_from_3d(
     camera_coordinates,
     *,
-    center_margin=0.05,
-    depth_margin=0.05,
-    angle_margin_deg=5.0,
+    center_margin=0.10,
 ):
     if camera_coordinates is None or len(camera_coordinates) < 3:
         return None, None, {"reason": "no_coordinates"}
 
     x, _, z = [float(v) for v in camera_coordinates[:3]]
 
-    if abs(z) < depth_margin:
-        return None, None, {"reason": "near_z_boundary", "x": x, "z": z}
-
     if abs(x) < center_margin:
-        return None, None, {"reason": "near_x_boundary", "x": x, "z": z}
+        return None, None, {
+            "reason": "near_x_boundary",
+            "x": x,
+            "z": z,
+        }
 
-    yaw_deg = math.degrees(math.atan2(x, z))
-    if abs(abs(yaw_deg) - 90.0) < angle_margin_deg:
-        return None, None, {"reason": "near_diagonal_boundary", "yaw_deg": yaw_deg}
+    if x < 0:
+        return 0, "Left", {"x": x, "z": z}
+    return 1, "Right", {"x": x, "z": z}
 
-    if z > 0:
-        if x < 0:
-            return 0, "Front-left", {"x": x, "z": z}
-        return 1, "Front-right", {"x": x, "z": z}
-    else:
-        if x < 0:
-            return 2, "Back-left", {"x": x, "z": z}
-        return 3, "Back-right", {"x": x, "z": z}
+
+### More robust quadrant classification for 5A that also considers depth and angle to avoid uncertain cases near boundaries.
+
+# def classify_camera_quadrant_robust(
+#     camera_coordinates,
+#     *,
+#     center_margin=0.05,
+#     depth_margin=0.05,
+#     angle_margin_deg=5.0,
+# ):
+#     if camera_coordinates is None or len(camera_coordinates) < 3:
+#         return None, None, {"reason": "no_coordinates"}
+
+#     x, _, z = [float(v) for v in camera_coordinates[:3]]
+
+#     if abs(z) < depth_margin:
+#         return None, None, {"reason": "near_z_boundary", "x": x, "z": z}
+
+#     if abs(x) < center_margin:
+#         return None, None, {"reason": "near_x_boundary", "x": x, "z": z}
+
+#     yaw_deg = math.degrees(math.atan2(x, z))
+#     if abs(abs(yaw_deg) - 90.0) < angle_margin_deg:
+#         return None, None, {"reason": "near_diagonal_boundary", "yaw_deg": yaw_deg}
+
+#     if z > 0:
+#         if x < 0:
+#             return 0, "Front-left", {"x": x, "z": z}
+#         return 1, "Front-right", {"x": x, "z": z}
+#     else:
+#         if x < 0:
+#             return 2, "Back-left", {"x": x, "z": z}
+#         return 3, "Back-right", {"x": x, "z": z}
+
+def determine_relative_answer_from_vector_robust(
+    vector,
+    *,
+    x_margin=0.08,
+    z_margin=0.15,
+):
+    x, _, z = [float(v) for v in vector[:3]]
+
+    can_lr = abs(x) >= x_margin
+    can_fb = abs(z) >= z_margin
+
+    #  Only classify into quadrants if we are reasonably far from both boundaries to ensure more reliable questions, otherwise fall back to simpler left/right or front/back classification, and if even that is not reliable then return None to skip the question.
+    if can_lr and can_fb:
+        if z > 0:
+            if x < 0:
+                return "quadrant", "Front-left"
+            return "quadrant", "Front-right"
+        else:
+            if x < 0:
+                return "quadrant", "Back-left"
+            return "quadrant", "Back-right"
+
+    # If we can't reliably classify into quadrants, try left/right 
+    if can_lr:
+        return "left_right", "Left" if x < 0 else "Right"
+
+    # If we can't reliably classify left/right, try front/back
+    if can_fb:
+        return "front_back", "Front" if z > 0 else "Back"
+
+    # If we can't reliably classify in any way, return None to indicate the question should be skipped.
+    return None, None
+
+
 
 def _require_query_time_target_state(
     candidate: KeyFrameCandidate,
@@ -997,21 +1081,122 @@ def _require_query_time_target_state(
 
     return state
 
-def _build_branch_object_camera_relative_position(
+# def _build_branch_object_camera_relative_position(
+#     candidate: KeyFrameCandidate,
+#     time_tok: str,
+#     *,
+#     target_state_at_query: dict[str, Any],
+#     rng: random.Random,
+# ) -> dict[str, Any]:
+#     correct_idx, label, debug = classify_camera_quadrant_robust(
+#         target_state_at_query.get("camera_coordinates"),
+#         center_margin=0.05,
+#         depth_margin=0.05,
+#         angle_margin_deg=5.0,
+#     )
+#     choices = list(CAMERA_QUADRANT_CHOICES)
+#     if label is not None and label in choices:
+#         choices, correct_idx = _finalize_choices(
+#             choices=choices,
+#             correct_answer=label,
+#             rng=rng,
+#             shuffle=True,
+#         )
+
+#     return {
+#         "step": "5a",
+#         "depends_on_steps": [1, 2, 3],
+#         "branch_group": "post_step4",
+#         "question_class": "oos_branch_object_camera_relative_position",
+#         "question": (
+#             f"At the current time {time_tok}, the target {candidate.object_name} is not visible. "
+#             f"Based on its last known position, in which direction is the target "
+#             f"{candidate.object_name} relative to the camera wearer?"
+#         ),
+#         "choices": choices,
+#         "correct_idx": correct_idx,
+#         "answer_metadata": {
+#             "reference_time_sec": candidate.query_time_sec,
+#             "camera_coordinates": target_state_at_query.get("camera_coordinates"),
+#             "world_coordinates": target_state_at_query.get("world_coordinates"),
+#             "status": target_state_at_query.get("status"),
+#             "correct_label": label,
+#             "debug": debug,
+#             "reference_source": "query_time_state_from_merged_tracks_or_live_state",
+#         },
+#         "skipped": correct_idx is None,
+#     }
+
+def _build_branch_object_camera_relative_position_3d(
     candidate: KeyFrameCandidate,
     time_tok: str,
     *,
     target_state_at_query: dict[str, Any],
+    last_visible: Any | None,
+    last_placement: Any | None,
+    cfg: BenchmarkConfig,
     rng: random.Random,
 ) -> dict[str, Any]:
-    correct_idx, label, debug = classify_camera_quadrant_robust(
-        target_state_at_query.get("camera_coordinates"),
-        center_margin=0.05,
-        depth_margin=0.05,
-        angle_margin_deg=5.0,
+
+    world_coord = target_state_at_query.get("world_coordinates")
+    source = "query_time"
+
+    if world_coord is None and last_visible is not None:
+        world_coord = getattr(last_visible, "world_coordinates", None)
+        source = "last_visible"
+
+    if world_coord is None and last_placement is not None:
+        world_coord = getattr(last_placement, "world_coordinates", None)
+        source = "last_placement"
+
+    if world_coord is None:
+        return {
+            "step": "5a",
+            "depends_on_steps": [1, 2, 3],
+            "branch_group": "post_step4",
+            "question_class": "oos_branch_object_camera_relative_position_3d",
+            "question": None,
+            "choices": [],
+            "correct_idx": None,
+            "answer_metadata": {
+                "reason": "no_world_coordinates",
+                "reference_source": None,
+            },
+            "skipped": True,
+        }
+
+    cam_coord = _world_to_camera_for_step5a(
+        video_id=candidate.video_id,
+        time_sec=candidate.query_time_sec,
+        world_coordinates=world_coord,
+        annotations_root=cfg.annotations_root,
+        fps=cfg.fps_for_frame_lookup,
     )
-    choices = list(CAMERA_QUADRANT_CHOICES)
-    if label is not None and label in choices:
+
+    if cam_coord is None:
+        return {
+            "step": "5a",
+            "depends_on_steps": [1, 2, 3],
+            "branch_group": "post_step4",
+            "question_class": "oos_branch_object_camera_relative_position_3d",
+            "question": None,
+            "choices": [],
+            "correct_idx": None,
+            "answer_metadata": {
+                "reason": "failed_world_to_camera_transform",
+                "world_coordinates": world_coord,
+                "reference_source": source,
+            },
+            "skipped": True,
+        }
+
+    correct_idx, label, debug = classify_camera_left_right_from_3d(
+        cam_coord,
+        center_margin=0.10,
+    )
+
+    choices = ["Left", "Right"]
+    if label is not None:
         choices, correct_idx = _finalize_choices(
             choices=choices,
             correct_answer=label,
@@ -1023,22 +1208,22 @@ def _build_branch_object_camera_relative_position(
         "step": "5a",
         "depends_on_steps": [1, 2, 3],
         "branch_group": "post_step4",
-        "question_class": "oos_branch_object_camera_relative_position",
+        "question_class": "oos_branch_object_camera_relative_position_3d",
         "question": (
             f"At the current time {time_tok}, the target {candidate.object_name} is not visible. "
-            f"Based on its last known position, in which direction is the target "
-            f"{candidate.object_name} relative to the camera wearer?"
+            f"Based on its last known 3D position, is the target {candidate.object_name} "
+            f"to the left or right of the camera wearer?"
         ),
         "choices": choices,
         "correct_idx": correct_idx,
         "answer_metadata": {
             "reference_time_sec": candidate.query_time_sec,
-            "camera_coordinates": target_state_at_query.get("camera_coordinates"),
-            "world_coordinates": target_state_at_query.get("world_coordinates"),
-            "status": target_state_at_query.get("status"),
+            "world_coordinates": world_coord,
+            "camera_coordinates_computed": cam_coord,
             "correct_label": label,
             "debug": debug,
-            "reference_source": "query_time_state_from_merged_tracks_or_live_state",
+            "reference_source": source,
+            "subtype": "left_right_3d",
         },
         "skipped": correct_idx is None,
     }
@@ -1048,18 +1233,87 @@ def log_step5_failure(reason: str, context: dict[str, Any]) -> None:
     print(f"[STEP5 DEBUG] {json.dumps(record, ensure_ascii=False)}")
 
 
-def _build_branch_object_object_relation(
+# def _build_branch_object_object_relation(
+#     candidate: KeyFrameCandidate,
+#     time_tok: str,
+#     *,
+#     anchor: dict[str, Any],
+#     target_state_at_query: dict[str, Any],
+#     cfg: BenchmarkConfig,
+# ) -> dict[str, Any]:
+#     if target_state_at_query.get("world_coordinates") is None:
+#         raise ValueError("Query-time target state has no world coordinates")
+#     if anchor.get("world_coordinates") is None:
+#         raise ValueError("Anchor has no world coordinates")
+
+#     vector = relation_from_world_points(
+#         video_id=candidate.video_id,
+#         time_sec=candidate.query_time_sec,
+#         object_a_world=target_state_at_query["world_coordinates"],
+#         object_b_world=anchor["world_coordinates"],
+#         annotations_root=cfg.annotations_root,
+#         fps=cfg.fps_for_frame_lookup,
+#     )
+
+#     rel_answer = determine_relative_answer_from_vector(vector)
+
+#     return {
+#         "step": "5b",
+#         "depends_on_steps": [1, 2, 3],
+#         "branch_group": "post_step4",
+#         "question_class": "oos_branch_object_object_relation",
+#         "question": (
+#             f"At time {time_tok}, the target {candidate.object_name} is not visible. "
+#             f"Based on the last known position of {candidate.object_name} and the marked "
+#             f"object {anchor['name']} in the current frame, where is the target "
+#             f"{candidate.object_name} relative to {anchor['name']}?"
+#         ),
+#         "choices": rel_answer.choices,
+#         "correct_idx": rel_answer.correct_idx,
+#         "acceptable_idxs": rel_answer.acceptable_idxs,
+#         "answer_metadata": {
+#             "object_x_assoc_id": candidate.assoc_id,
+#             "object_x_name": candidate.object_name,
+#             "object_x_reference_time_sec": candidate.query_time_sec,
+#             "object_x_status": target_state_at_query.get("status"),
+#             "object_x_world_coordinates": target_state_at_query.get("world_coordinates"),
+#             "object_x_camera_coordinates": target_state_at_query.get("camera_coordinates"),
+#             "object_y_assoc_id": anchor["assoc_id"],
+#             "object_y_name": anchor["name"],
+#             "object_y_reference_time_sec": candidate.query_time_sec,
+#             "object_y_world_coordinates": anchor["world_coordinates"],
+#             "object_y_projected_pixel": anchor.get("projected_pixel"),
+#             "reference_source": "query_time_state_from_merged_tracks_or_live_state",
+#         },
+#     }
+
+def _build_branch_object_object_relation_v2(
     candidate: KeyFrameCandidate,
     time_tok: str,
     *,
     anchor: dict[str, Any],
     target_state_at_query: dict[str, Any],
     cfg: BenchmarkConfig,
+    rng: random.Random,
 ) -> dict[str, Any]:
+
     if target_state_at_query.get("world_coordinates") is None:
-        raise ValueError("Query-time target state has no world coordinates")
+        return {
+            "step": "5b",
+            "skipped": True,
+            "answer_metadata": {
+                "reason": "target_has_no_world_coordinates",
+            },
+        }
+
     if anchor.get("world_coordinates") is None:
-        raise ValueError("Anchor has no world coordinates")
+        return {
+            "step": "5b",
+            "skipped": True,
+            "answer_metadata": {
+                "reason": "anchor_has_no_world_coordinates",
+            },
+        }
 
     vector = relation_from_world_points(
         video_id=candidate.video_id,
@@ -1070,36 +1324,103 @@ def _build_branch_object_object_relation(
         fps=cfg.fps_for_frame_lookup,
     )
 
-    rel_answer = determine_relative_answer_from_vector(vector)
+    mode, label = determine_relative_answer_from_vector_robust(
+        vector,
+        x_margin=0.08,
+        z_margin=0.15,
+    )
+
+    if label is None:
+        return {
+            "step": "5b",
+            "depends_on_steps": [1, 2, 3],
+            "branch_group": "post_step4",
+            "question_class": "oos_branch_object_object_relation",
+            "question": None,
+            "choices": [],
+            "correct_idx": None,
+            "acceptable_idxs": [],
+            "answer_metadata": {
+                "reason": "ambiguous_relation_after_fallback",
+                "relative_vector": vector,
+                "relation_mode": None,
+                "correct_label": None,
+            },
+            "skipped": True,
+        }
+
+    if mode == "quadrant":
+        choices = ["Front-left", "Front-right", "Back-left", "Back-right"]
+        question = (
+            f"At time {time_tok}, the target {candidate.object_name} is not visible. "
+            f"Based on the last known position of {candidate.object_name} and the marked "
+            f"object {anchor['name']} in the current frame, where is the target "
+            f"{candidate.object_name} relative to {anchor['name']}?"
+        )
+    elif mode == "left_right":
+        choices = ["Left", "Right"]
+        question = (
+            f"At time {time_tok}, the target {candidate.object_name} is not visible. "
+            f"Relative to the marked object {anchor['name']} in the current frame, "
+            f"is the target {candidate.object_name} more to the left or right?"
+        )
+    elif mode == "front_back":
+        choices = ["Front", "Back"]
+        question = (
+            f"At time {time_tok}, the target {candidate.object_name} is not visible. "
+            f"Relative to the marked object {anchor['name']} in the current frame, "
+            f"is the target {candidate.object_name} more in front or behind?"
+        )
+    else:
+        return {
+            "step": "5b",
+            "depends_on_steps": [1, 2, 3],
+            "branch_group": "post_step4",
+            "question_class": "oos_branch_object_object_relation",
+            "question": None,
+            "choices": [],
+            "correct_idx": None,
+            "acceptable_idxs": [],
+            "answer_metadata": {
+                "reason": "unsupported_relation_mode",
+                "relative_vector": vector,
+                "relation_mode": mode,
+                "correct_label": label,
+            },
+            "skipped": True,
+        }
+
+    choices, correct_idx = _finalize_choices(
+        choices=choices,
+        correct_answer=label,
+        rng=rng,
+        shuffle=True,
+    )
 
     return {
         "step": "5b",
         "depends_on_steps": [1, 2, 3],
         "branch_group": "post_step4",
         "question_class": "oos_branch_object_object_relation",
-        "question": (
-            f"At time {time_tok}, the target {candidate.object_name} is not visible. "
-            f"Based on the last known position of {candidate.object_name} and the marked "
-            f"object {anchor['name']} in the current frame, where is the target "
-            f"{candidate.object_name} relative to {anchor['name']}?"
-        ),
-        "choices": rel_answer.choices,
-        "correct_idx": rel_answer.correct_idx,
-        "acceptable_idxs": rel_answer.acceptable_idxs,
+        "question": question,
+        "choices": choices,
+        "correct_idx": correct_idx,
+        "acceptable_idxs": [correct_idx],
         "answer_metadata": {
             "object_x_assoc_id": candidate.assoc_id,
             "object_x_name": candidate.object_name,
             "object_x_reference_time_sec": candidate.query_time_sec,
             "object_x_status": target_state_at_query.get("status"),
             "object_x_world_coordinates": target_state_at_query.get("world_coordinates"),
-            "object_x_camera_coordinates": target_state_at_query.get("camera_coordinates"),
             "object_y_assoc_id": anchor["assoc_id"],
             "object_y_name": anchor["name"],
-            "object_y_reference_time_sec": candidate.query_time_sec,
             "object_y_world_coordinates": anchor["world_coordinates"],
-            "object_y_projected_pixel": anchor.get("projected_pixel"),
+            "relative_vector": vector,
+            "relation_mode": mode,
+            "correct_label": label,
             "reference_source": "query_time_state_from_merged_tracks_or_live_state",
         },
+        "skipped": False,
     }
 
 def classify_distance_bucket(distance_m: float) -> str | None:
@@ -1370,6 +1691,12 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
                 states = caches.states_by_assoc_id(candidate.video_id, candidate.query_time_sec)
                 object_state = states.get(candidate.assoc_id)
                 if object_state is None:
+                    print("[DROP_OBJECT_STATE_NONE]", {
+                    "video_id": candidate.video_id,
+                    "assoc_id": candidate.assoc_id,
+                    "object_name": candidate.object_name,
+                    "query_time_sec": candidate.query_time_sec,
+                    })
                     continue
 
                 common = _build_common_fields(candidate)
@@ -1396,9 +1723,22 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
 
                 last_visible = _find_last_visible_info(candidate, cfg, caches)
                 if last_visible is None:
+                    print("[DROP_LAST_VISIBLE_NONE]", {
+                    "video_id": candidate.video_id,
+                    "assoc_id": candidate.assoc_id,
+                    "object_name": candidate.object_name,
+                    "query_time_sec": candidate.query_time_sec,
+                    })
                     continue
 
                 if last_visible.status == "in_motion":
+                    print("[DROP_LAST_VISIBLE_IN_MOTION]", {
+                    "video_id": candidate.video_id,
+                    "assoc_id": candidate.assoc_id,
+                    "object_name": candidate.object_name,
+                    "query_time_sec": candidate.query_time_sec,
+                    "last_visible_status": last_visible.status,
+                    })
                     continue
 
                 candidate_fixture = None
@@ -1406,11 +1746,24 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
                     candidate_fixture = semantic_fixture_name(last_visible.fixture)
 
                 if candidate_fixture is not None and _is_invalid_step4_fixture_label(candidate_fixture):
+                    print("[DROP_INVALID_FIXTURE]", {
+                    "video_id": candidate.video_id,
+                    "assoc_id": candidate.assoc_id,
+                    "object_name": candidate.object_name,
+                    "query_time_sec": candidate.query_time_sec,
+                    "candidate_fixture": candidate_fixture,
+                    })
                     continue
 
                 incremental_steps.append(_build_step2_last_visible(candidate, time_tok, last_visible, cfg))
                 last_placement = _find_last_placement_info(candidate, cfg, caches)
                 if last_placement is None:
+                    print("[DROP_LAST_PLACEMENT_NONE]", {
+                    "video_id": candidate.video_id,
+                    "assoc_id": candidate.assoc_id,
+                    "object_name": candidate.object_name,
+                    "query_time_sec": candidate.query_time_sec,
+                    })
                     continue
                 incremental_steps.append(_build_step3_last_placement(candidate, time_tok, last_placement, cfg))
                 incremental_steps.append(
@@ -1426,27 +1779,54 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
                 
                 target_state_at_query = _require_query_time_target_state(candidate, caches)
 
-                # 5a must be unambiguous, otherwise drop whole trajectory
-                branch_camera = _build_branch_object_camera_relative_position(
+                # # 5a must be unambiguous, otherwise drop whole trajectory
+                # branch_camera = _build_branch_object_camera_relative_position(
+                #     candidate,
+                #     time_tok,
+                #     target_state_at_query=target_state_at_query,
+                #     rng=rng,
+                # )
+                # if branch_camera.get("skipped", False):
+                #     print(
+                #         "[DROP_TRAJECTORY_AMBIGUOUS_5A]",
+                #         {
+                #             "video_id": candidate.video_id,
+                #             "assoc_id": candidate.assoc_id,
+                #             "object_name": candidate.object_name,
+                #             "query_time_sec": candidate.query_time_sec,
+                #             "camera_coordinates": target_state_at_query.get("camera_coordinates"),
+                #             "debug": branch_camera.get("answer_metadata", {}).get("debug"),
+                #         },
+                #     )
+                # else:
+                #     branch_steps.append(branch_camera)
+                #     continue
+                # branch_steps.append(branch_camera)
+                branch_camera = _build_branch_object_camera_relative_position_3d(
                     candidate,
                     time_tok,
                     target_state_at_query=target_state_at_query,
+                    last_visible=last_visible,
+                    last_placement=last_placement,
+                    cfg=cfg,
                     rng=rng,
                 )
                 if branch_camera.get("skipped", False):
                     print(
-                        "[DROP_TRAJECTORY_AMBIGUOUS_5A]",
+                        "[SKIP_BRANCH_5A]",
                         {
                             "video_id": candidate.video_id,
                             "assoc_id": candidate.assoc_id,
                             "object_name": candidate.object_name,
                             "query_time_sec": candidate.query_time_sec,
-                            "camera_coordinates": target_state_at_query.get("camera_coordinates"),
                             "debug": branch_camera.get("answer_metadata", {}).get("debug"),
+                            "reference_source": branch_camera.get("answer_metadata", {}).get("reference_source"),
+                            "world_coordinates": branch_camera.get("answer_metadata", {}).get("world_coordinates"),
+                            "camera_coordinates_computed": branch_camera.get("answer_metadata", {}).get("camera_coordinates_computed"),
                         },
                     )
-                    continue
-                branch_steps.append(branch_camera)
+                else:
+                    branch_steps.append(branch_camera)
 
                 # Anchor is required for 5b/5c, otherwise drop whole trajectory
                 anchor = _pick_step4_anchor(candidate, cfg, caches)
@@ -1463,26 +1843,47 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
                     continue
 
                 try:
-                    step5b = _build_branch_object_object_relation(
-                        candidate,
-                        time_tok,
-                        anchor=anchor,
-                        target_state_at_query=target_state_at_query,
-                        cfg=cfg,
-                    )
+                #     step5b = _build_branch_object_object_relation(
+                #         candidate,
+                #         time_tok,
+                #         anchor=anchor,
+                #         target_state_at_query=target_state_at_query,
+                #         cfg=cfg,
+                #     )
+                # # except Exception as e:
+                # #     print(
+                # #         "[DROP_TRAJECTORY_5B_FAIL]",
+                # #         {
+                # #             "video_id": candidate.video_id,
+                # #             "assoc_id": candidate.assoc_id,
+                # #             "object_name": candidate.object_name,
+                # #             "query_time_sec": candidate.query_time_sec,
+                # #             "anchor_assoc_id": anchor.get("assoc_id"),
+                # #             "err": str(e),
+                # #         },
+                # #     )
+                # #     continue
+                        step5b = _build_branch_object_object_relation_v2(
+                            candidate,
+                            time_tok,
+                            anchor=anchor,
+                            target_state_at_query=target_state_at_query,
+                            cfg=cfg,
+                            rng=rng,
+                        )
+
+                        if step5b.get("skipped", False):
+                            print("[SKIP_BRANCH_5B]", step5b.get("answer_metadata", {}))
+                        else:
+                            branch_steps.append(step5b)
+
                 except Exception as e:
-                    print(
-                        "[DROP_TRAJECTORY_5B_FAIL]",
-                        {
-                            "video_id": candidate.video_id,
-                            "assoc_id": candidate.assoc_id,
-                            "object_name": candidate.object_name,
-                            "query_time_sec": candidate.query_time_sec,
-                            "anchor_assoc_id": anchor.get("assoc_id"),
-                            "err": str(e),
-                        },
-                    )
-                    continue
+                    print("[SKIP_BRANCH_5B]", ...)
+                    step5b = None
+
+
+                if step5b is not None:
+                    branch_steps.append(step5b)
 
                 try:
                     step5c = _build_branch_object_object_distance(
