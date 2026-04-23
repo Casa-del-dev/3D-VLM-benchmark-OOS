@@ -1206,7 +1206,7 @@ def _build_branch_object_camera_relative_position_3d(
 
     return {
         "step": "5a",
-        "depends_on_steps": [1, 2, 3],
+        "depends_on_steps": [1, 2, 3, 4],
         "branch_group": "post_step4",
         "question_class": "oos_branch_object_camera_relative_position_3d",
         "question": (
@@ -1399,7 +1399,7 @@ def _build_branch_object_object_relation_v2(
 
     return {
         "step": "5b",
-        "depends_on_steps": [1, 2, 3],
+        "depends_on_steps": [1, 2, 3, 4],
         "branch_group": "post_step4",
         "question_class": "oos_branch_object_object_relation",
         "question": question,
@@ -1475,7 +1475,7 @@ def _build_branch_object_object_distance(
 
     return {
         "step": "5c",
-        "depends_on_steps": [1, 2, 3],
+        "depends_on_steps": [1, 2, 3, 4],
         "branch_group": "post_step4",
         "question_class": "oos_branch_object_object_distance",
         "question": (
