@@ -1127,6 +1127,107 @@ def _require_query_time_target_state(
 #         "skipped": correct_idx is None,
 #     }
 
+# def _build_branch_object_camera_relative_position_3d(
+#     candidate: KeyFrameCandidate,
+#     time_tok: str,
+#     *,
+#     target_state_at_query: dict[str, Any],
+#     last_visible: Any | None,
+#     last_placement: Any | None,
+#     cfg: BenchmarkConfig,
+#     rng: random.Random,
+# ) -> dict[str, Any]:
+
+#     world_coord = target_state_at_query.get("world_coordinates")
+#     source = "query_time"
+
+#     if world_coord is None and last_visible is not None:
+#         world_coord = getattr(last_visible, "world_coordinates", None)
+#         source = "last_visible"
+
+#     if world_coord is None and last_placement is not None:
+#         world_coord = getattr(last_placement, "world_coordinates", None)
+#         source = "last_placement"
+
+#     if world_coord is None:
+#         return {
+#             "step": "5a",
+#             "depends_on_steps": [1, 2, 3],
+#             "branch_group": "post_step4",
+#             "question_class": "oos_branch_object_camera_relative_position_3d",
+#             "question": None,
+#             "choices": [],
+#             "correct_idx": None,
+#             "answer_metadata": {
+#                 "reason": "no_world_coordinates",
+#                 "reference_source": None,
+#             },
+#             "skipped": True,
+#         }
+
+#     cam_coord = _world_to_camera_for_step5a(
+#         video_id=candidate.video_id,
+#         time_sec=candidate.query_time_sec,
+#         world_coordinates=world_coord,
+#         annotations_root=cfg.annotations_root,
+#         fps=cfg.fps_for_frame_lookup,
+#     )
+
+#     if cam_coord is None:
+#         return {
+#             "step": "5a",
+#             "depends_on_steps": [1, 2, 3],
+#             "branch_group": "post_step4",
+#             "question_class": "oos_branch_object_camera_relative_position_3d",
+#             "question": None,
+#             "choices": [],
+#             "correct_idx": None,
+#             "answer_metadata": {
+#                 "reason": "failed_world_to_camera_transform",
+#                 "world_coordinates": world_coord,
+#                 "reference_source": source,
+#             },
+#             "skipped": True,
+#         }
+
+#     correct_idx, label, debug = classify_camera_left_right_from_3d(
+#         cam_coord,
+#         center_margin=0.10,
+#     )
+
+#     choices = ["Left", "Right"]
+#     if label is not None:
+#         choices, correct_idx = _finalize_choices(
+#             choices=choices,
+#             correct_answer=label,
+#             rng=rng,
+#             shuffle=True,
+#         )
+
+#     return {
+#         "step": "5a",
+#         "depends_on_steps": [1, 2, 3],
+#         "branch_group": "post_step4",
+#         "question_class": "oos_branch_object_camera_relative_position_3d",
+#         "question": (
+#             f"At the current time {time_tok}, the target {candidate.object_name} is not visible. "
+#             f"Based on its last known 3D position, is the target {candidate.object_name} "
+#             f"to the left or right of the camera wearer?"
+#         ),
+#         "choices": choices,
+#         "correct_idx": correct_idx,
+#         "answer_metadata": {
+#             "reference_time_sec": candidate.query_time_sec,
+#             "world_coordinates": world_coord,
+#             "camera_coordinates_computed": cam_coord,
+#             "correct_label": label,
+#             "debug": debug,
+#             "reference_source": source,
+#             "subtype": "left_right_3d",
+#         },
+#         "skipped": correct_idx is None,
+#     }
+
 def _build_branch_object_camera_relative_position_3d(
     candidate: KeyFrameCandidate,
     time_tok: str,
@@ -1138,16 +1239,17 @@ def _build_branch_object_camera_relative_position_3d(
     rng: random.Random,
 ) -> dict[str, Any]:
 
+    # 1) choose world-coordinate source
     world_coord = target_state_at_query.get("world_coordinates")
-    source = "query_time"
+    world_source = "query_time"
 
     if world_coord is None and last_visible is not None:
         world_coord = getattr(last_visible, "world_coordinates", None)
-        source = "last_visible"
+        world_source = "last_visible"
 
     if world_coord is None and last_placement is not None:
         world_coord = getattr(last_placement, "world_coordinates", None)
-        source = "last_placement"
+        world_source = "last_placement"
 
     if world_coord is None:
         return {
@@ -1165,13 +1267,19 @@ def _build_branch_object_camera_relative_position_3d(
             "skipped": True,
         }
 
-    cam_coord = _world_to_camera_for_step5a(
-        video_id=candidate.video_id,
-        time_sec=candidate.query_time_sec,
-        world_coordinates=world_coord,
-        annotations_root=cfg.annotations_root,
-        fps=cfg.fps_for_frame_lookup,
-    )
+    # 2) prefer precomputed camera coordinates; fallback to recomputation
+    cam_coord = target_state_at_query.get("camera_coordinates")
+    camera_source = "precomputed_query_time_state"
+
+    if cam_coord is None:
+        cam_coord = _world_to_camera_for_step5a(
+            video_id=candidate.video_id,
+            time_sec=candidate.query_time_sec,
+            world_coordinates=world_coord,
+            annotations_root=cfg.annotations_root,
+            fps=cfg.fps_for_frame_lookup,
+        )
+        camera_source = "recomputed_from_world_and_query_pose"
 
     if cam_coord is None:
         return {
@@ -1183,9 +1291,11 @@ def _build_branch_object_camera_relative_position_3d(
             "choices": [],
             "correct_idx": None,
             "answer_metadata": {
-                "reason": "failed_world_to_camera_transform",
+                "reason": "failed_camera_coordinate_resolution",
                 "world_coordinates": world_coord,
-                "reference_source": source,
+                "world_source": world_source,
+                "camera_source": camera_source,
+                "reference_source": world_source,
             },
             "skipped": True,
         }
@@ -1206,7 +1316,7 @@ def _build_branch_object_camera_relative_position_3d(
 
     return {
         "step": "5a",
-        "depends_on_steps": [1, 2, 3, 4],
+        "depends_on_steps": [1, 2, 3],
         "branch_group": "post_step4",
         "question_class": "oos_branch_object_camera_relative_position_3d",
         "question": (
@@ -1219,10 +1329,13 @@ def _build_branch_object_camera_relative_position_3d(
         "answer_metadata": {
             "reference_time_sec": candidate.query_time_sec,
             "world_coordinates": world_coord,
+            "camera_coordinates": target_state_at_query.get("camera_coordinates"),
             "camera_coordinates_computed": cam_coord,
             "correct_label": label,
             "debug": debug,
-            "reference_source": source,
+            "reference_source": world_source,
+            "world_source": world_source,
+            "camera_source": camera_source,
             "subtype": "left_right_3d",
         },
         "skipped": correct_idx is None,
@@ -1399,7 +1512,7 @@ def _build_branch_object_object_relation_v2(
 
     return {
         "step": "5b",
-        "depends_on_steps": [1, 2, 3, 4],
+        "depends_on_steps": [1, 2, 3],
         "branch_group": "post_step4",
         "question_class": "oos_branch_object_object_relation",
         "question": question,
@@ -1475,7 +1588,7 @@ def _build_branch_object_object_distance(
 
     return {
         "step": "5c",
-        "depends_on_steps": [1, 2, 3, 4],
+        "depends_on_steps": [1, 2, 3],
         "branch_group": "post_step4",
         "question_class": "oos_branch_object_object_distance",
         "question": (

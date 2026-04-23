@@ -282,10 +282,13 @@ def build_text_panel(trajectory_id: str, traj: Dict[str, Any]) -> str:
         "=== Branches ===",
         "Branch 5a: object-camera relative position",
         f"  chosen label: {idx_to_choice((step5a or {}).get('choices', []), (step5a or {}).get('correct_idx'))}",
+        f"  camera_source: {s5a_meta.get('camera_source', 'N/A')}",
+        f"  camera_coordinates: {s5a_meta.get('camera_coordinates', 'N/A')}",
         f"  camera_coordinates_computed: {s5a_meta.get('camera_coordinates_computed', s5a_meta.get('camera_coordinates', 'N/A'))}",
         f"  world_coordinates: {s5a_meta.get('world_coordinates', 'N/A')}",
         f"  reference_source: {s5a_meta.get('reference_source', 'N/A')}",
         f"  subtype: {s5a_meta.get('subtype', 'N/A')}",
+        
         "",
         # "Branch 5b: object-object relation",
         # f"  chosen label: {idx_to_choice((step4b or {}).get('choices', []), (step4b or {}).get('correct_idx'))}",
@@ -312,7 +315,9 @@ def build_text_panel(trajectory_id: str, traj: Dict[str, Any]) -> str:
         f"  distance_bucket: {s4c_meta.get('distance_bucket', 'N/A')}",
         f"  relative vector: {s4c_meta.get('vector_object_x_relative_to_object_y', 'N/A')}",
     ]
+
     return wrap_lines(lines)
+
 
 
 def draw_quadrant_overlay(ax, label: Optional[str], title: str, box_anchor=(0.72, 0.72)) -> None:
