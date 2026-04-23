@@ -209,21 +209,19 @@ def build_text_panel(trajectory_id: str, traj: Dict[str, Any]) -> str:
     step3 = get_step(traj, "3") or get_step_by_class(traj, "oos_step3_last_placement")
     step4 = get_step(traj, 4) or get_step_by_class(traj, "oos_step3_fixture")
 
-    # step4a = get_step_by_class(traj, "oos_branch_object_camera_relative_position")
+    step4a = get_step_by_class(traj, "oos_branch_object_camera_relative_position")
     # step4b = get_step_by_class(traj, "oos_branch_object_object_relation")
     step4c = get_step_by_class(traj, "oos_branch_object_object_distance")
 
-    step5a = get_step_by_class(traj, "oos_branch_object_camera_relative_position_3d")
     step5b = get_step_by_class(traj, "oos_branch_object_object_relation")
     
     s1_meta = (step1 or {}).get("answer_metadata", {}) or {}
     s2_meta = (step2 or {}).get("answer_metadata", {}) or {}
     s3_meta = (step3 or {}).get("answer_metadata", {}) or {}
     s4_meta = (step4 or {}).get("answer_metadata", {}) or {}
-    # s4a_meta = (step4a or {}).get("answer_metadata", {}) or {}
+    s4a_meta = (step4a or {}).get("answer_metadata", {}) or {}
     # s4b_meta = (step4b or {}).get("answer_metadata", {}) or {}
     s4c_meta = (step4c or {}).get("answer_metadata", {}) or {}
-    s5a_meta = (step5a or {}).get("answer_metadata", {}) or {}
     s5b_meta = (step5b or {}).get("answer_metadata", {}) or {}
 
     # anchor_pixel = s4b_meta.get("object_y_projected_pixel", s4b_meta.get("object_y_pixel", "N/A"))
@@ -273,23 +271,23 @@ def build_text_panel(trajectory_id: str, traj: Dict[str, Any]) -> str:
         f"  choices: {(step4 or {}).get('choices', [])}",
         f"  reference_time_sec: {s4_meta.get('reference_time_sec', 'N/A')}",
         "",
-        # "=== Branches ===",
-        # "Branch 5a: object-camera relative position",
-        # f"  chosen label: {idx_to_choice((step4a or {}).get('choices', []), (step4a or {}).get('correct_idx'))}",
-        # f"  camera_coordinates: {s4a_meta.get('camera_coordinates', 'N/A')}",
-        # f"  status: {s4a_meta.get('status', 'N/A')}",
-        # "",
         "=== Branches ===",
         "Branch 5a: object-camera relative position",
-        f"  chosen label: {idx_to_choice((step5a or {}).get('choices', []), (step5a or {}).get('correct_idx'))}",
-        f"  camera_source: {s5a_meta.get('camera_source', 'N/A')}",
-        f"  camera_coordinates: {s5a_meta.get('camera_coordinates', 'N/A')}",
-        f"  camera_coordinates_computed: {s5a_meta.get('camera_coordinates_computed', s5a_meta.get('camera_coordinates', 'N/A'))}",
-        f"  world_coordinates: {s5a_meta.get('world_coordinates', 'N/A')}",
-        f"  reference_source: {s5a_meta.get('reference_source', 'N/A')}",
-        f"  subtype: {s5a_meta.get('subtype', 'N/A')}",
-        
+        f"  chosen label: {idx_to_choice((step4a or {}).get('choices', []), (step4a or {}).get('correct_idx'))}",
+        f"  camera_coordinates: {s4a_meta.get('camera_coordinates', 'N/A')}",
+        f"  status: {s4a_meta.get('status', 'N/A')}",
         "",
+        # "=== Branches ===",
+        # "Branch 5a: object-camera relative position",
+        # f"  chosen label: {idx_to_choice((step5a or {}).get('choices', []), (step5a or {}).get('correct_idx'))}",
+        # f"  camera_source: {s5a_meta.get('camera_source', 'N/A')}",
+        # f"  camera_coordinates: {s5a_meta.get('camera_coordinates', 'N/A')}",
+        # f"  camera_coordinates_computed: {s5a_meta.get('camera_coordinates_computed', s5a_meta.get('camera_coordinates', 'N/A'))}",
+        # f"  world_coordinates: {s5a_meta.get('world_coordinates', 'N/A')}",
+        # f"  reference_source: {s5a_meta.get('reference_source', 'N/A')}",
+        # f"  subtype: {s5a_meta.get('subtype', 'N/A')}",
+        
+        # "",
         # "Branch 5b: object-object relation",
         # f"  chosen label: {idx_to_choice((step4b or {}).get('choices', []), (step4b or {}).get('correct_idx'))}",
         # f"  anchor object: {s4b_meta.get('object_y_name', 'N/A')} ({s4b_meta.get('object_y_assoc_id', 'N/A')})",
