@@ -49,6 +49,7 @@ class ObjectSample:
     fixture: str | None
     frame_index: int | None
     world_coordinates: list[float] | None = None
+    camera_coordinates: list[float] | None = None
     geometrically_occluded: bool | None = None
 
 
@@ -163,6 +164,7 @@ def generate_in_view_tracks(
                     fixture=state.fixture,
                     frame_index=state.frame_number,
                     world_coordinates=list(state.world_coordinates) if state.world_coordinates is not None else None,
+                    camera_coordinates=list(state.camera_coordinates) if state.camera_coordinates is not None else None,
                 )
             )
 
@@ -200,6 +202,7 @@ def track_to_dict(track: ObjectInViewTrack) -> dict[str, Any]:
                 "fixture": sample.fixture,
                 "frame_index": sample.frame_index,
                 "world_coordinates": sample.world_coordinates,
+                "camera_coordinates": sample.camera_coordinates,
             }
             for sample in track.samples
         ],
@@ -217,6 +220,7 @@ def track_from_dict(row: dict[str, Any]) -> ObjectInViewTrack:
             fixture=sample.get("fixture"),
             frame_index=sample.get("frame_index"),
             world_coordinates=sample.get("world_coordinates"),
+            camera_coordinates=sample.get("camera_coordinates"),
             geometrically_occluded=sample.get("geometrically_occluded"),
         )
         for sample in row.get("samples", [])
