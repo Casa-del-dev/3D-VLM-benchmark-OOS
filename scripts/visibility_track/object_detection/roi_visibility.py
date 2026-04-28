@@ -139,17 +139,19 @@ class ROIVisibilityEstimator:
         roi: ROIBox,
         projected_uv: Tuple[float, float],
     ) -> float:
-        det_center = self._box_center(det.bbox_xyxy)
-        roi_diag = math.hypot(max(1, roi.width()), max(1, roi.height()))
-        loc_score = self._distance_score(det_center, projected_uv, norm=0.6 * roi_diag)
-        size_score = self._size_score(det.bbox_xyxy, roi)
+        # det_center = self._box_center(det.bbox_xyxy)
+        # roi_diag = math.hypot(max(1, roi.width()), max(1, roi.height()))
+        # loc_score = self._distance_score(det_center, projected_uv, norm=0.6 * roi_diag)
+        # size_score = self._size_score(det.bbox_xyxy, roi)
         conf_score = float(det.confidence)
 
-        return (
-            self.score_conf_weight * conf_score
-            + self.score_location_weight * loc_score
-            + self.score_size_weight * size_score
-        )
+        return conf_score
+
+        # return (
+        #     self.score_conf_weight * conf_score
+        #     + self.score_location_weight * loc_score
+        #     + self.score_size_weight * size_score
+        # )
 
     def estimate(
         self,
