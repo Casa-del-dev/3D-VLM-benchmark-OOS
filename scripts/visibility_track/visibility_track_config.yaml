@@ -37,18 +37,38 @@ geometric_occlusion:
   # counting hits on the object's own surface as occlusion.
   tolerance_m: 0.05
 
-# --- Object detection (Grounding DINO) ---------------------------------------
+# --- Object detection (Grounding DINO or Detic) ---------------------------------------
 object_detection:
   enabled: true
   model_id: IDEA-Research/grounding-dino-base
   roi_scale: 1.5
   box_threshold: 0.40
   text_threshold: 0.30
-  visible_threshold: 0.82
+  visible_threshold: 0.7
   partial_threshold: 0.28
   uncertainty_px: 20
   # Pixel fallback when the projected object has no known bbox size.
   default_expected_size_px: 120
+
+# object_detection:
+#   backend: detic
+
+#   detic_root: /Users/fangzhouma/Desktop/3d_vision/FIction-Detic
+
+#   # choose one model
+#   config_file: configs/Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.yaml
+#   weights: models/Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.pth
+
+#   vocabulary: custom
+#   device: cpu
+
+#   roi_scale: 1.8
+#   box_threshold: 0.25
+#   text_threshold: 0.25
+#   visible_threshold: 0.5
+#   partial_threshold: 0.3
+#   uncertainty_px: 40
+#   default_expected_size_px: 120
 
 # --- Output ------------------------------------------------------------------
 output_root: ./outputs/visibility_track

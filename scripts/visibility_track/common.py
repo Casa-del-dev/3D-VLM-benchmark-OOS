@@ -27,6 +27,15 @@ class DetectionConfig:
     uncertainty_px: int = 40
     default_expected_size_px: int = 120
 
+    backend: str = "groundingdino"  # "groundingdino" or "detic"
+
+    # Detic-specific
+    detic_root: str | None = None
+    config_file: str | None = None
+    weights: str | None = None
+    vocabulary: str = "custom"
+    device: str = "cpu"
+
 
 @dataclass
 class PipelineConfig:
@@ -125,6 +134,13 @@ def load_config(config_path: str | os.PathLike) -> PipelineConfig:
         partial_threshold=float(det_raw.get("partial_threshold", 0.28)),
         uncertainty_px=int(det_raw.get("uncertainty_px", 40)),
         default_expected_size_px=int(det_raw.get("default_expected_size_px", 120)),
+
+        backend=det_raw.get("backend", "groundingdino"),
+        detic_root=det_raw.get("detic_root"),
+        config_file=det_raw.get("config_file"),
+        weights=det_raw.get("weights"),
+        vocabulary=det_raw.get("vocabulary", "custom"),
+        device=det_raw.get("device", "cpu"),
     )
 
     geo_raw = raw.get("geometric_occlusion", {}) or {}

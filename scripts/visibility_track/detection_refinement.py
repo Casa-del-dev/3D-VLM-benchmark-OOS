@@ -107,29 +107,70 @@ class VideoFrameReader:
         self.close()
 
 
-# --- Grounding DINO estimator ------------------------------------------------
+# --- Grounding DINO estimator or Detic estimator ---------------------------------------------
 
 def _build_estimator(det_cfg: DetectionConfig):
-    if __package__ in (None, ""):
-        from scripts.visibility_track.object_detection.groundingdino_roi_visibility import (
-            GroundingDINODetector,
-            ROIGroundingDINOVisibilityEstimator,
-        )
-    else:
-        from .object_detection.groundingdino_roi_visibility import (
-            GroundingDINODetector,
-            ROIGroundingDINOVisibilityEstimator,
+    backend = getattr(det_cfg, "backend", "groundingdino").lower()
+
+    if backend in {"groundingdino", "grounding_dino", "gdino"}:
+        if __package__ in (None, ""):
+            from scripts.visibility_track.object_detection.groundingdino_roi_visibility import (
+                GroundingDINODetector,
+                ROIGroundingDINOVisibilityEstimator,
+            )
+        else:
+            from .object_detection.groundingdino_roi_visibility import (
+                GroundingDINODetector,
+                ROIGroundingDINOVisibilityEstimator,
+            )
+
+        detector = GroundingDINODetector(model_id=det_cfg.model_id)
+        return ROIGroundingDINOVisibilityEstimator(
+            detector=detector,
+            roi_scale=det_cfg.roi_scale,
+            box_threshold=det_cfg.box_threshold,
+            text_threshold=det_cfg.text_threshold,
+            visible_threshold=det_cfg.visible_threshold,
+            partial_threshold=det_cfg.partial_threshold,
         )
 
-    detector = GroundingDINODetector(model_id=det_cfg.model_id)
-    return ROIGroundingDINOVisibilityEstimator(
-        detector=detector,
-        roi_scale=det_cfg.roi_scale,
-        box_threshold=det_cfg.box_threshold,
-        text_threshold=det_cfg.text_threshold,
-        visible_threshold=det_cfg.visible_threshold,
-        partial_threshold=det_cfg.partial_threshold,
-    )
+    if backend == "detic":
+        if __package__ in (None, ""):
+            from scripts.visibility_track.object_detection.detic_detector import DeticDetector
+            from scripts.visibility_track.object_detection.roi_visibility import ROIVisibilityEstimator
+        else:
+            from .object_detection.detic_detector import DeticDetector
+            from .object_detection.roi_visibility import ROIVisibilityEstimator
+
+        if not det_cfg.detic_root:
+            raise ValueError("object_detection.detic_root must be set when backend='detic'")
+        if not det_cfg.config_file:
+            raise ValueError("object_detection.config_file must be set when backend='detic'")
+        if not det_cfg.weights:
+            raise ValueError("object_detection.weights must be set when backend='detic'")
+
+        detector = DeticDetector(
+            detic_root=det_cfg.detic_root,
+            config_file=det_cfg.config_file,
+            weights=det_cfg.weights,
+            vocabulary=getattr(det_cfg, "vocabulary", "custom"),
+            custom_vocabulary=["object"],
+            confidence_threshold=det_cfg.box_threshold,
+            device=getattr(det_cfg, "device", "cpu"),
+        )
+
+        return ROIVisibilityEstimator(
+            detector=detector,
+            detector_name="Detic",
+            roi_scale=det_cfg.roi_scale,
+            box_threshold=det_cfg.box_threshold,
+            text_threshold=det_cfg.text_threshold,
+            visible_threshold=det_cfg.visible_threshold,
+            partial_threshold=det_cfg.partial_threshold,
+            smoother=None,
+        )
+
+    raise ValueError(f"Unsupported object detection backend: {backend}")
 
 
 # --- Detection sampling strategy ---------------------------------------------
@@ -226,10 +267,19 @@ def _sample_detection(
         "time_sec": time_sec,
         "label": result.label,
         "score": float(result.visibility_score),
+        "reason": result.reason,
         "projected_uv": list(state.projected_pixel),
         "mask_bbox": mask_bbox,
         "expected_box_size_px": [float(expected_size[0]), float(expected_size[1])],
         "roi_bbox_xyxy": [result.roi.x1, result.roi.y1, result.roi.x2, result.roi.y2],
+        "detections": [
+            {
+                "bbox_xyxy": list(det.bbox_xyxy),
+                "confidence": float(det.confidence),
+                "phrase": det.phrase,
+            }
+            for det in result.detections
+        ],
     }
 
 
