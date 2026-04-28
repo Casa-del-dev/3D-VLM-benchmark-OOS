@@ -297,6 +297,149 @@ def _passthrough(interval: CoarseInterval) -> RefinedInterval:
         fixture=interval.fixture,
     )
 
+def _sample_to_observed_status(sample: dict) -> str:
+    """
+    Convert one detection sample label into the final observed interval status.
+
+    Important:
+    - Only 'visible' is treated as visible.
+    - 'partially_visible', 'not_visible', 'uncertain', etc. are treated as not visible.
+    - 'skipped' samples should normally be filtered out before this function.
+    """
+    if sample.get("label") == "visible":
+        return OBSERVED_VISIBLE
+    return OBSERVED_NOT_VISIBLE
+
+
+def _status_reason(status: str, n_samples: int) -> str:
+    if status == OBSERVED_VISIBLE:
+        return f"detected in {n_samples} sample(s)"
+    return f"not detected in {n_samples} sample(s)"
+
+
+def _split_interval_by_detection_samples(
+    interval: CoarseInterval,
+    samples: list[dict],
+    use_midpoint_boundaries: bool = True,
+) -> list[RefinedInterval]:
+    """
+    Split one coarse open-fixture interval into multiple refined intervals
+    according to the temporal sequence of detection results.
+
+    Example:
+        samples = [
+            {'time_sec': 10.0, 'label': 'visible'},
+            {'time_sec': 12.0, 'label': 'not_visible'},
+            {'time_sec': 14.0, 'label': 'not_visible'},
+        ]
+
+    If use_midpoint_boundaries=True:
+        [start, 11.0] -> observed_visible_in_open_fixture
+        [11.0, end]   -> observed_not_visible_in_open_fixture
+
+    If use_midpoint_boundaries=False:
+        [start, 10.0] -> observed_visible_in_open_fixture
+        [10.0, end]   -> observed_not_visible_in_open_fixture
+    """
+    tested = [row for row in samples if row.get("label") != "skipped"]
+
+    if not tested:
+        return [
+            RefinedInterval(
+                video_id=interval.video_id,
+                assoc_id=interval.assoc_id,
+                object_name=interval.object_name,
+                start_sec=interval.start_sec,
+                end_sec=interval.end_sec,
+                status=OBSERVED_NOT_VISIBLE,
+                reason="no valid detection samples",
+                fixture=interval.fixture,
+                detection_samples=samples,
+            )
+        ]
+
+    tested = sorted(tested, key=lambda row: float(row["time_sec"]))
+
+    sample_states: list[tuple[float, str, dict]] = [
+        (
+            float(row["time_sec"]),
+            _sample_to_observed_status(row),
+            row,
+        )
+        for row in tested
+    ]
+
+    # Build segment boundaries. The first sample status is assumed to hold
+    # from interval.start_sec until the first status transition.
+    segments: list[tuple[float, float, str, list[dict]]] = []
+
+    current_start = float(interval.start_sec)
+    current_status = sample_states[0][1]
+    current_samples: list[dict] = [sample_states[0][2]]
+
+    for i in range(1, len(sample_states)):
+        prev_t, prev_status, _prev_sample = sample_states[i - 1]
+        curr_t, curr_status, curr_sample = sample_states[i]
+
+        if curr_status == current_status:
+            current_samples.append(curr_sample)
+            continue
+
+        if use_midpoint_boundaries:
+            boundary = 0.5 * (prev_t + curr_t)
+        else:
+            # This matches your described behavior more literally:
+            # visible through the previous detected-visible frame,
+            # then switch after that frame.
+            boundary = prev_t
+
+        boundary = max(float(interval.start_sec), min(float(interval.end_sec), boundary))
+
+        if boundary > current_start:
+            segments.append((current_start, boundary, current_status, current_samples))
+
+        current_start = boundary
+        current_status = curr_status
+        current_samples = [curr_sample]
+
+    interval_end = float(interval.end_sec)
+    if interval_end > current_start:
+        segments.append((current_start, interval_end, current_status, current_samples))
+
+    # If the interval is degenerate or all boundaries collapsed, still output one row.
+    if not segments:
+        status = sample_states[-1][1]
+        return [
+            RefinedInterval(
+                video_id=interval.video_id,
+                assoc_id=interval.assoc_id,
+                object_name=interval.object_name,
+                start_sec=interval.start_sec,
+                end_sec=interval.end_sec,
+                status=status,
+                reason=_status_reason(status, len(tested)),
+                fixture=interval.fixture,
+                detection_samples=samples,
+            )
+        ]
+
+    refined: list[RefinedInterval] = []
+    for seg_start, seg_end, status, seg_samples in segments:
+        refined.append(
+            RefinedInterval(
+                video_id=interval.video_id,
+                assoc_id=interval.assoc_id,
+                object_name=interval.object_name,
+                start_sec=round(seg_start, 6),
+                end_sec=round(seg_end, 6),
+                status=status,
+                reason=_status_reason(status, len(seg_samples)),
+                fixture=interval.fixture,
+                detection_samples=seg_samples,
+            )
+        )
+
+    return refined
 
 def _refine_candidate(
     interval: CoarseInterval,
@@ -309,7 +452,7 @@ def _refine_candidate(
     det_sampling_fps: float,
     det_cfg: DetectionConfig,
     cache: "VideoCache | None" = None,
-) -> RefinedInterval:
+) -> list[RefinedInterval]:
     times = _detection_times(interval.start_sec, interval.end_sec, det_sampling_fps)
     samples = [
         _sample_detection(
@@ -328,27 +471,10 @@ def _refine_candidate(
         for time_sec in times
     ]
 
-    tested = [row for row in samples if row["label"] != "skipped"]
-    positive = [row for row in tested if row["label"] in {"visible"}]
-
-    if positive:
-        status = OBSERVED_VISIBLE
-        reason = f"detected in {len(positive)}/{len(tested)} samples"
-    else:
-        status = OBSERVED_NOT_VISIBLE
-        n = len(tested) if tested else 0
-        reason = f"not detected in {n} samples" if n else "no valid detection samples"
-
-    return RefinedInterval(
-        video_id=interval.video_id,
-        assoc_id=interval.assoc_id,
-        object_name=interval.object_name,
-        start_sec=interval.start_sec,
-        end_sec=interval.end_sec,
-        status=status,
-        reason=reason,
-        fixture=interval.fixture,
-        detection_samples=samples,
+    return _split_interval_by_detection_samples(
+        interval=interval,
+        samples=samples,
+        use_midpoint_boundaries=getattr(det_cfg, "use_midpoint_boundaries", True),
     )
 
 
@@ -384,7 +510,7 @@ def refine_with_detection(
                     continue
 
                 pbar.set_postfix_str(interval.object_name)
-                output.append(
+                output.extend(
                     _refine_candidate(
                         interval=interval,
                         estimator=estimator,
