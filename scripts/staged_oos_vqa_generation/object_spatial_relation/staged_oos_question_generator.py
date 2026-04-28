@@ -751,7 +751,7 @@ def _build_step1_visibility(candidate: KeyFrameCandidate, object_state: Any, tim
         "step": 1,
         "question_class": "oos_step1_visibility",
         "question": (
-            f"At the current time {time_tok}, is the target {candidate.object_name} that was moved earlier visible in the current frame?"
+            f"At the current time {time_tok}, is the previously moved {candidate.object_name} visible in the current frame?"
         ),
         "choices": choices,
         "correct_idx": correct_idx,
@@ -783,8 +783,8 @@ def _build_step2_last_visible(
         "step": 2,
         "question_class": "oos_step2_last_visible",
         "question": (
-            f"At the current time {time_tok}, the target {candidate.object_name} that was moved earlier is not visible. "
-            f"When was it last visible, and where was it located in the image?"
+            #f"At the current time {time_tok}, the {candidate.object_name} that was moved earlier is not visible. "
+            f"When was the previously moved {candidate.object_name} last visible, and where was it located in the image at that moment?"
         ),
         "choices": [],
         "correct_idx": None,
@@ -825,8 +825,8 @@ def _build_step3_last_placement(
         "step": "3",
         "question_class": "oos_step3_last_placement",
         "question": (
-            f"At the current time {time_tok}, when was the target {candidate.object_name} last placed, "
-            f"and where was it placed?"
+            #f"At the current time {time_tok}, the {candidate.object_name} that was moved earlier is not visible. "
+            f"At what time did the previously moved {candidate.object_name} stop moving? Where was it located in the image at that moment?",
         ),
         "choices": [],
         "correct_idx": None,
@@ -896,8 +896,8 @@ def _build_step4_fixture(
             "step": 4,
             "question_class": "oos_step4_fixture",
             "question": (
-                f"At the current time {time_tok}, based on the last placement of the target "
-                f"{candidate.object_name} that was moved earlier, which nearby fixture is closest to it?"
+                f"At the current time {time_tok}, based on the last known position of the {candidate.object_name} that was moved earlier,"
+                f"which fixture is closest to it?"
             ),
             "choices": choices,
             "correct_idx": choices.index(correct_fixture),
@@ -925,9 +925,9 @@ def _build_step4_fixture(
         "step": 4,
         "question_class": "oos_step4_fixture",
         "question": (
-            f"At the current time {time_tok}, based on the last placement of the target "
-            f"{candidate.object_name} that was moved earlier, which nearby fixture or landmark is closest to it?"
-        ),
+            f"At the current time {time_tok}, based on the last known position of the {candidate.object_name} that was moved earlier,"
+            f"which fixture is closest to it?"        
+            ),
         "choices": abs_answer.choices,
         "correct_idx": abs_answer.correct_idx,
         "answer_metadata": {
@@ -1025,10 +1025,9 @@ def _build_branch_object_camera_relative_position(
         "branch_group": "post_step4",
         "question_class": "oos_branch_object_camera_relative_position",
         "question": (
-            f"At the current time {time_tok}, the target {candidate.object_name} is not visible. "
-            f"Based on its last known position, in which direction is the target "
-            f"{candidate.object_name} relative to the camera wearer?"
-        ),
+            f"At the current time {time_tok}, the {candidate.object_name} that was moved earlier is not visible. "
+            f"Based on its last known position, in which direction is the {candidate.object_name} from your viewpoint?"        
+            ),
         "choices": choices,
         "correct_idx": correct_idx,
         "answer_metadata": {
@@ -1078,10 +1077,9 @@ def _build_branch_object_object_relation(
         "branch_group": "post_step4",
         "question_class": "oos_branch_object_object_relation",
         "question": (
-            f"At time {time_tok}, the target {candidate.object_name} is not visible. "
-            f"Based on the last known position of {candidate.object_name} and the marked "
-            f"object {anchor['name']} in the current frame, where is the target "
-            f"{candidate.object_name} relative to {anchor['name']}?"
+            f"At the current time {time_tok}, the {candidate.object_name} that was moved earlier is not visible. "
+            f"Based on the last known position of the {candidate.object_name} and the position of the marked {anchor['name']} in the current frame, "
+            f"where is the {candidate.object_name} relative to {anchor['name']} from your viewpoint?"
         ),
         "choices": rel_answer.choices,
         "correct_idx": rel_answer.correct_idx,
@@ -1158,9 +1156,9 @@ def _build_branch_object_object_distance(
         "branch_group": "post_step4",
         "question_class": "oos_branch_object_object_distance",
         "question": (
-            f"At time {time_tok}, {candidate.object_name} is not visible. Based on the last known "
-            f"position of {candidate.object_name}, and the marked object {anchor['name']} in the "
-            f"current frame, how far is {candidate.object_name} from {anchor['name']}?"
+            f"At the current time {time_tok}, the {candidate.object_name} that was moved earlier is not visible. "
+            f"Based on the last known position of the {candidate.object_name}, and the position of the marked {anchor['name']} in the current frame, "
+            f"how far is the {candidate.object_name} from the{anchor['name']}?"
         ),
         "choices": choices,
         "correct_idx": correct_idx,
