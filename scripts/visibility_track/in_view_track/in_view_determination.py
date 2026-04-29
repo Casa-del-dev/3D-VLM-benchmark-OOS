@@ -6,6 +6,8 @@ from pathlib import Path
 import json
 import math
 from typing import Any
+import numpy as np
+from PIL import Image
 
 
 DEFAULT_INTERMEDIATE_ROOT = "Intermediate_data"
@@ -28,6 +30,7 @@ class FrameContext:
 	T_camera_world: list[list[float]]
 	assoc_objects: dict[str, dict[str, Any]]
 	mask_info_video: dict[str, dict[str, Any]]
+	black_border_mask: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -208,6 +211,39 @@ def point_in_image(pixel_xy: list[float] | None, width: int, height: int) -> boo
 	u, v = pixel_xy
 	return 0.0 <= u < width and 0.0 <= v < height
 
+def load_black_border_mask(mask_path: Path) -> np.ndarray:
+    """
+    Load camera-rgb_black_border_mask.png.
+
+    Convention:
+        white / nonzero pixel = black border / invalid region
+        black / zero pixel    = valid image region
+    """
+    mask = np.array(Image.open(mask_path).convert("L"))
+    return mask > 0
+
+
+def point_in_black_border(
+    pixel_xy: list[float] | None,
+    black_border_mask: np.ndarray | None,
+    width: int,
+    height: int,
+) -> bool:
+    """Return True if projected pixel falls inside the black-border mask."""
+    if pixel_xy is None or black_border_mask is None:
+        return False
+
+    u, v = pixel_xy
+
+    # Use nearest pixel location.
+    x = int(round(u))
+    y = int(round(v))
+
+    if not (0 <= x < width and 0 <= y < height):
+        return False
+
+    return bool(black_border_mask[y, x])
+
 
 def find_closest_frame_entry(framewise_rows: list[dict[str, Any]], time_sec: float, fps: float) -> dict[str, Any]:
 	"""Find frame metadata closest to query time using frame index distance."""
@@ -231,6 +267,7 @@ class VideoCache:
 	mask_info_video: dict[str, dict[str, Any]]
 	calibration_rgb: dict[str, Any]
 	framewise_rows: list[dict[str, Any]]
+	black_border_mask: np.ndarray | None
 	# Pre-built index for O(log N) frame lookup (populated by build())
 	framewise_sorted_indices: list[int]
 	framewise_index: dict[int, dict[str, Any]]
@@ -256,6 +293,13 @@ class VideoCache:
 		calibration = load_json(video_dir / "device_calibration.json")
 		framewise_rows = load_jsonl(video_dir / "framewise_info.jsonl")
 
+		black_border_mask_path = annotations_root / "camera-rgb_black_border_mask.png"
+
+		black_border_mask = (
+			load_black_border_mask(black_border_mask_path)
+			if black_border_mask_path.exists()
+			else None
+		)
 		# Build sorted index over valid rows for O(log N) closest-frame lookup.
 		valid_rows = [
 			r for r in framewise_rows
@@ -270,6 +314,7 @@ class VideoCache:
 			mask_info_video=mask_info[video_id],
 			calibration_rgb=calibration["cameras"]["camera-rgb"],
 			framewise_rows=framewise_rows,
+			black_border_mask=black_border_mask,
 			framewise_sorted_indices=framewise_sorted_indices,
 			framewise_index=framewise_index,
 		)
@@ -322,6 +367,7 @@ def load_frame_context(
 		T_camera_world=T_camera_world,
 		assoc_objects=cache.assoc_objects,
 		mask_info_video=cache.mask_info_video,
+		black_border_mask=cache.black_border_mask,
 	)
 
 
@@ -442,10 +488,32 @@ def determine_in_view_objects(
 				)
 			)
 			continue
+
 		cam_xyz = transform_point(ctx.T_camera_world, world_xyz)
-		pixel_xy, depth, valid = project_fisheye624(cam_xyz, ctx.projection_params) if ctx.model_name == "CameraModelType.FISHEYE624" else (None, cam_xyz[2], False)
-		in_view = valid and point_in_image(pixel_xy, ctx.image_width, ctx.image_height)
-		comment = "Projected inside RGB image bounds." if in_view else "Projected outside RGB image bounds or behind camera."
+
+		pixel_xy, depth, valid = (
+			project_fisheye624(cam_xyz, ctx.projection_params)
+			if ctx.model_name == "CameraModelType.FISHEYE624"
+			else (None, cam_xyz[2], False)
+		)
+
+		inside_image = point_in_image(pixel_xy, ctx.image_width, ctx.image_height)
+
+		in_black_border = point_in_black_border(
+			pixel_xy=pixel_xy,
+			black_border_mask=ctx.black_border_mask,
+			width=ctx.image_width,
+			height=ctx.image_height,
+		)
+
+		in_view = valid and inside_image and not in_black_border
+
+		if in_view:
+			comment = "Projected inside RGB valid image region."
+		elif valid and inside_image and in_black_border:
+			comment = "Projected inside RGB image bounds but inside black-border mask."
+		else:
+			comment = "Projected outside RGB image bounds or behind camera."
 
 		out.append(
 			ObjectState(

@@ -286,7 +286,7 @@ if __name__ == "__main__":
     main()
 
 # python scripts/staged_oos_vqa_generation/object_spatial_relation/prepare_tracks_for_generation_via_merging.py \
-#   --video_id P01-20240203-132119 \
-#   --in_view_jsonl scripts/visibility_track/outputs/visibility_track/P01-20240203-132119/in_view_tracks.jsonl \
-#   --visibility_jsonl scripts/visibility_track/outputs/visibility_track/P01-20240203-132119/visibility_track.jsonl \
-#   --output_json scripts/staged_oos_vqa_generation/object_spatial_relation/outputs/merged_tracks/P01/P01-20240203-132119_merged_visibility_track.json
+#   --video_id P01-20240202-110250 \
+#   --in_view_jsonl scripts/visibility_track/outputs/visibility_track/P01-20240202-110250/in_view_tracks.jsonl \
+#   --visibility_jsonl scripts/visibility_track/outputs/visibility_track/P01-20240202-110250/visibility_track.jsonl \
+#   --output_json scripts/staged_oos_vqa_generation/object_spatial_relation/outputs/merged_tracks/P01/P01-20240202-110250_merged_visibility_track.json
