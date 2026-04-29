@@ -13,6 +13,7 @@ from in_view_determination import (
     choose_track_for_time,
     get_mask_from_track,
     load_json,
+    load_frame_context,
 )
 
 
@@ -64,6 +65,12 @@ class KeyFrameCandidate:
     clip_start_time_sec: float
     clip_end_time_sec: float
     clip_duration_sec: float
+
+    anchor_assoc_id: str | None = None
+    anchor_name: str | None = None
+    anchor_projected_pixel: list[float] | None = None
+    anchor_world_coordinates: list[float] | None = None
+    anchor_status: str | None = None
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -452,9 +459,11 @@ def _state_at_time(track: ObjectVisibilityTrack, query_time_sec: float, eps: flo
 
 
 def _eligible_anchor_objects_at_time(
+    video_id: str,
     tracks: dict[str, ObjectVisibilityTrack],
     query_time_sec: float,
     target_assoc_id: str,
+    annotations_root: str | Path,
 ) -> list[dict[str, Any]]:
     """
     Return all non-target objects that are eligible to serve as anchors at query_time_sec.
@@ -479,17 +488,70 @@ def _eligible_anchor_objects_at_time(
             continue
         if st["world_coordinates"] is None:
             continue
+        if len(_eligible_prior_tracks(
+            video_id=video_id,
+            assoc_id=str(assoc_id),
+            query_time_sec=query_time_sec,
+            annotations_root=annotations_root,
+        )) == 0:
+            continue
 
         eligible.append(st)
     return eligible
 
 
-def _has_valid_anchor_at_time(
+# def _has_valid_anchor_at_time(
+#     video_id: str,
+#     tracks: dict[str, ObjectVisibilityTrack],
+#     query_time_sec: float,
+#     target_assoc_id: str,
+#     annotations_root: str | Path,
+# ) -> bool:
+#     return len(_eligible_anchor_objects_at_time(
+#         video_id=video_id,
+#         tracks=tracks,
+#         query_time_sec=query_time_sec,
+#         target_assoc_id=target_assoc_id,
+#         annotations_root=annotations_root,
+#     )) > 0
+
+def _pick_valid_anchor_at_time(
+    video_id: str,
     tracks: dict[str, ObjectVisibilityTrack],
     query_time_sec: float,
     target_assoc_id: str,
-) -> bool:
-    return len(_eligible_anchor_objects_at_time(tracks, query_time_sec, target_assoc_id)) > 0
+    annotations_root: str | Path,
+    fps_for_frame_lookup: float = 30.0,
+    intermediate_root: str = DEFAULT_INTERMEDIATE_ROOT,
+) -> dict[str, Any] | None:
+    eligible = _eligible_anchor_objects_at_time(
+        video_id=video_id,
+        tracks=tracks,
+        query_time_sec=query_time_sec,
+        target_assoc_id=target_assoc_id,
+        annotations_root=annotations_root,
+    )
+    if not eligible:
+        return None
+
+    ctx = load_frame_context(
+        video_id=video_id,
+        time_sec=query_time_sec,
+        annotations_root=annotations_root,
+        fps=fps_for_frame_lookup,
+        intermediate_root=intermediate_root,
+    )
+    cx = float(ctx.image_width) / 2.0
+    cy = float(ctx.image_height) / 2.0
+
+    return min(
+        eligible,
+        key=lambda s: (
+            float(s["projected_pixel"][0]) - cx
+        ) ** 2 + (
+            float(s["projected_pixel"][1]) - cy
+        ) ** 2,
+    )
 
 def generate_key_frames_for_video(
     video_id: str,
@@ -634,13 +696,18 @@ def generate_key_frames_for_video(
                 continue
 
             fixture = _fixture_for_object_at_time(video_id, score.assoc_id, t_sec, annotations_root)
-            if not _has_valid_anchor_at_time(
+            anchor = _pick_valid_anchor_at_time(
+                video_id=video_id,
                 tracks=tracks,
                 query_time_sec=t_sec,
                 target_assoc_id=score.assoc_id,
-            ):
+                annotations_root=annotations_root,
+                fps_for_frame_lookup=fps_for_frame_lookup,
+                intermediate_root=intermediate_root,
+            )
+            if anchor is None:
                 print(
-                    "[SKIP_NO_ANCHOR_AT_QUERY_TIME]",
+                    "[SKIP_NO_MOVED_ANCHOR_AT_QUERY_TIME]",
                     {
                         "video_id": video_id,
                         "assoc_id": score.assoc_id,
@@ -668,6 +735,12 @@ def generate_key_frames_for_video(
                     clip_start_time_sec=clip_start_time_sec,
                     clip_end_time_sec=clip_end_time_sec,
                     clip_duration_sec=clip_duration_sec,
+
+                    anchor_assoc_id=str(anchor["assoc_id"]),
+                    anchor_name=str(anchor.get("name", anchor["assoc_id"])),
+                    anchor_projected_pixel=anchor.get("projected_pixel"),
+                    anchor_world_coordinates=anchor.get("world_coordinates"),
+                    anchor_status=anchor.get("status"),
                 )
             )
 
@@ -744,6 +817,12 @@ def key_frames_to_dict(candidates: list[KeyFrameCandidate]) -> list[dict[str, An
             "clip_start_time_sec": c.clip_start_time_sec,
             "clip_end_time_sec": c.clip_end_time_sec,
             "clip_duration_sec": c.clip_duration_sec,
+
+            "anchor_assoc_id": c.anchor_assoc_id,
+            "anchor_name": c.anchor_name,
+            "anchor_projected_pixel": c.anchor_projected_pixel,
+            "anchor_world_coordinates": c.anchor_world_coordinates,
+            "anchor_status": c.anchor_status,
         }
         for c in candidates
     ]

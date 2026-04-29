@@ -1224,6 +1224,22 @@ ANCHOR_STABLE_VISIBLE_STATUSES = {
     "observed_visible_in_open_fixture",
 }
 
+def _anchor_from_candidate(candidate: KeyFrameCandidate) -> dict[str, Any] | None:
+    if getattr(candidate, "anchor_assoc_id", None) is None:
+        return None
+    if getattr(candidate, "anchor_world_coordinates", None) is None:
+        return None
+
+    return {
+        "assoc_id": str(candidate.anchor_assoc_id),
+        "name": str(candidate.anchor_name or candidate.anchor_assoc_id),
+        "projected_pixel": candidate.anchor_projected_pixel,
+        "world_coordinates": candidate.anchor_world_coordinates,
+        "camera_coordinates": None,
+        "status": candidate.anchor_status,
+        "reference_source": "key_frame_generator_selected_anchor",
+    }
+
 def _pick_step4_anchor(candidate, cfg, caches):
     states_by_assoc = caches.states_by_assoc_id(
         candidate.video_id,
@@ -1447,10 +1463,10 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
                 branch_steps.append(branch_camera)
 
                 # Anchor is required for 5b/5c, otherwise drop whole trajectory
-                anchor = _pick_step4_anchor(candidate, cfg, caches)
+                anchor = _anchor_from_candidate(candidate)
                 if anchor is None:
                     print(
-                        "[DROP_TRAJECTORY_NO_ANCHOR]",
+                        "[DROP_TRAJECTORY_NO_STORED_ANCHOR]",
                         {
                             "video_id": candidate.video_id,
                             "assoc_id": candidate.assoc_id,

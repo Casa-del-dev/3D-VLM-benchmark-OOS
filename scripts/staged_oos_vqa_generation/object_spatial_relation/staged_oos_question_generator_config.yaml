@@ -3,7 +3,7 @@ intermediate_root: Intermediate_data
 
 inputs:
   videos:
-    - P01-20240203-184045
+    - P01-20240202-110250
 
 # Sampling
 sampling_fps: 1.0
@@ -11,8 +11,8 @@ fps_for_frame_lookup: 30.0
 pre_context_sec: 2.0
 
 # Out-of-sight definition
-out_of_sight_horizon_sec: 2.0
-max_questions_per_video: 5
+out_of_sight_horizon_sec: 5.0
+max_questions_per_video: 30
 
 # step 2 last visible observation
 raw_video_width: 1408
@@ -37,9 +37,9 @@ relative:
 random_seed: 42
 
 # Output
-output_json: outputs/generated_vqa/P01-20240203-184045_vqa.json
+output_json: outputs/generated_vqa/P01-20240202-110250_vqa_5_anchor_fixed.json
 
 #in_view track
 visibility_tracks_json:
-  P01-20240203-184045: outputs/merged_tracks/P01/P01-20240203-184045_merged_visibility_track.json
+  P01-20240202-110250: outputs/merged_tracks/P01/P01-20240202-110250_merged_visibility_track.json
 
