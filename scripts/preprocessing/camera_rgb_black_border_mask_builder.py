@@ -3,10 +3,10 @@ import numpy as np
 from PIL import Image
 
 # Path to your uploaded calibration file
-calib_path = "/Users/fangzhouma/Desktop/3d_vision/3D-VLM-benchmark-OOS/hd-epic-annotations/Intermediate_data/P04/P04-20240413-142619/device_calibration.json"
+calib_path = "hd-epic-annotations/Intermediate_data/P01/P01-20240202-110250/device_calibration.json"
 
 # Output path
-output_path = "/Users/fangzhouma/Desktop/3d_vision/3D-VLM-benchmark-OOS/hd-epic-annotations/camera-rgb_black_border_mask.png"
+output_path = "hd-epic-annotations/camera-rgb_black_border_mask.png"
 
 # Load calibration
 with open(calib_path, "r") as f:

@@ -75,6 +75,18 @@ Output: `visibility_track.jsonl` + `visibility_track_summary.json`
 
 ## Run
 
+First generate a binary valid-region mask for the fisheye camera:      
+white / nonzero pixel = black border / invalid region
+black / zero pixel    = valid image region
+
+Run
+```
+python scripts/preprocessing/camera_rgb_black_border_mask_builder.py
+```
+will generate the binary mask to the hd-epic-annotations folder. (You may need to change the path in the python script, jsut make sure to output to the annotation folder, as the in-view generator will need to use this mask and load the mask from the annotation folder by default).
+
+
+Second:
 ```bash
 # Full pipeline -- all videos listed in config
 python -m scripts.visibility_track.generate_visibility_track
