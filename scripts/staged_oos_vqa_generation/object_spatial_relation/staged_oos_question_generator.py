@@ -1059,6 +1059,12 @@ def _build_branch_object_object_relation(
         raise ValueError("Query-time target state has no world coordinates")
     if anchor.get("world_coordinates") is None:
         raise ValueError("Anchor has no world coordinates")
+    
+    anchor_normalized_projected_pixel = _normalize_projected_pixel(
+        anchor.get("projected_pixel"),
+        cfg.raw_video_width,
+        cfg.raw_video_height,
+    )
 
     vector = relation_from_world_points(
         video_id=candidate.video_id,
@@ -1096,6 +1102,7 @@ def _build_branch_object_object_relation(
             "object_y_reference_time_sec": candidate.query_time_sec,
             "object_y_world_coordinates": anchor["world_coordinates"],
             "object_y_projected_pixel": anchor.get("projected_pixel"),
+            "object_y_normalized_projected_pixel": anchor_normalized_projected_pixel,
             "reference_source": "query_time_state_from_merged_tracks_or_live_state",
         },
     }
@@ -1127,6 +1134,12 @@ def _build_branch_object_object_distance(
         raise ValueError("Target state at query has no world coordinates")
     if anchor.get("world_coordinates") is None:
         raise ValueError("Anchor has no world coordinates")
+
+    anchor_normalized_projected_pixel = _normalize_projected_pixel(
+        anchor.get("projected_pixel"),
+        cfg.raw_video_width,
+        cfg.raw_video_height,
+    )
 
     vector = relation_from_world_points(
         video_id=candidate.video_id,
@@ -1170,6 +1183,7 @@ def _build_branch_object_object_distance(
             "object_y_assoc_id": str(anchor["assoc_id"]),
             "object_y_name": str(anchor["name"]),
             "object_y_pixel": anchor.get("projected_pixel"),
+            "object_y_normalized_projected_pixel": anchor_normalized_projected_pixel,
             "object_y_status": anchor.get("status"),
             "vector_object_x_relative_to_object_y": vector,
             "distance_m": distance_m,
