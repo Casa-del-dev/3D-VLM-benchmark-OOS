@@ -826,7 +826,7 @@ def _build_step3_last_placement(
         "question_class": "oos_step3_last_placement",
         "question": (
             #f"At the current time {time_tok}, the {candidate.object_name} that was moved earlier is not visible. "
-            f"At what time did the previously moved {candidate.object_name} stop moving? Where was it located in the image at that moment?",
+            f"At what time did the previously moved {candidate.object_name} stop moving? Where was it located in the image at that moment?"
         ),
         "choices": [],
         "correct_idx": None,

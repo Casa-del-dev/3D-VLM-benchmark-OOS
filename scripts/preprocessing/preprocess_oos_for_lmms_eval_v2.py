@@ -26,6 +26,15 @@ def ensure_dir(path: Path) -> None:
 def normalize_step_id(step_value: Any) -> str:
     return str(step_value).strip()
 
+def normalize_question_text(question: Any) -> str:
+    if question is None:
+        return ""
+    if isinstance(question, str):
+        return question.strip()
+    if isinstance(question, list):
+        return " ".join(str(q).strip() for q in question if q is not None and str(q).strip())
+    return str(question).strip()
+
 def normalize_answer_metadata(meta: Any) -> Dict[str, Any]:
     if not isinstance(meta, dict):
         return {}
@@ -217,7 +226,7 @@ def trajectory_to_single_turn_examples(
             "branch_group": step.get("branch_group"),
             "depends_on_steps": dep_map[step_id],
             "step_question_class": step.get("question_class"),
-            "question": step.get("question"),
+            "question": normalize_question_text(step.get("question")),
             "choices": step.get("choices", []),
             "correct_idx": step.get("correct_idx"),
             "acceptable_idxs": step.get("acceptable_idxs"),
@@ -260,7 +269,7 @@ def make_multiturn_messages_from_gold(
 
         messages.append({
             "role": "user",
-            "content": [{"type": "text", "text": (step.get("question") or "").strip()}],
+            "content": [{"type": "text", "text": normalize_question_text(step.get("question"))}],
         })
 
         gold_answer = get_step_target_text(step)
@@ -296,7 +305,7 @@ def trajectory_to_multiturn_example(
             "branch_group": step.get("branch_group"),
             "depends_on_steps": dep_map[step_id],
             "step_question_class": step.get("question_class"),
-            "question": step.get("question"),
+            "question": normalize_question_text(step.get("question")),
             "choices": step.get("choices", []),
             "correct_idx": step.get("correct_idx"),
             "acceptable_idxs": step.get("acceptable_idxs"),
@@ -357,7 +366,13 @@ def build_stats(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Preprocess staged OOS QA JSON for lmms-eval.")
-    parser.add_argument("--input", type=Path, required=True, help="Path to VQA JSON")
+    parser.add_argument(
+    "--input",
+    type=Path,
+    nargs="+",
+    required=True,
+    help="Path(s) to one or more VQA JSON files",
+    )
     parser.add_argument("--output-dir", type=Path, required=True, help="Directory to write processed files")
     parser.add_argument(
         "--video-root",
@@ -377,34 +392,43 @@ def main() -> None:
     args = parse_args()
     ensure_dir(args.output_dir)
 
-    raw = load_json(args.input)
+    for input_path in args.input:
+        raw = load_json(input_path)
 
     single_turn_records: List[Dict[str, Any]] = []
     multi_turn_records: List[Dict[str, Any]] = []
 
-    for trajectory_id, traj in raw.items():
-        if should_exclude_trajectory(traj):
-            continue
+    for input_path in args.input:
+        raw = load_json(input_path)
 
-        video_id = traj.get("video_id")
-        video_path = find_video_path(args.video_root, video_id) if video_id else None
+        for trajectory_id, traj in raw.items():
+            if should_exclude_trajectory(traj):
+                continue
 
-        single_turn_records.extend(
-            trajectory_to_single_turn_examples(
-                trajectory_id=trajectory_id,
-                traj=traj,
-                video_path=video_path,
+            video_id = traj.get("video_id")
+            video_path = find_video_path(args.video_root, video_id) if video_id else None
+
+            if video_id:
+                merged_trajectory_id = f"{video_id}__{trajectory_id}"
+            else:
+                merged_trajectory_id = trajectory_id
+
+            single_turn_records.extend(
+                trajectory_to_single_turn_examples(
+                    trajectory_id=merged_trajectory_id,
+                    traj=traj,
+                    video_path=video_path,
+                )
             )
-        )
 
-        multi_turn_records.append(
-            trajectory_to_multiturn_example(
-                trajectory_id=trajectory_id,
-                traj=traj,
-                video_path=video_path,
-                include_gold_history=args.include_gold_history,
+            multi_turn_records.append(
+                trajectory_to_multiturn_example(
+                    trajectory_id=merged_trajectory_id,
+                    traj=traj,
+                    video_path=video_path,
+                    include_gold_history=args.include_gold_history,
+                )
             )
-        )
 
     single_path = args.output_dir / "single_turn.jsonl"
     multi_path = args.output_dir / "multi_turn.jsonl"
@@ -425,7 +449,11 @@ if __name__ == "__main__":
     main()
 
 # python scripts/preprocessing/preprocess_oos_for_lmms_eval_v2.py \
-#     --input scripts/staged_oos_vqa_generation/object_spatial_relation/outputs/generated_vqa/P04-20240413-142619_vqa.json \
+#     --input \
+#         scripts/staged_oos_vqa_generation/object_spatial_relation/outputs/generated_vqa/P01-20240202-110250_vqa_5_anchor_fixed_normalized.json \
+#         scripts/staged_oos_vqa_generation/object_spatial_relation/outputs/generated_vqa/P01-20240202-110250_vqa_30_anchor_fixed_normalized.json \
+#         scripts/staged_oos_vqa_generation/object_spatial_relation/outputs/generated_vqa/P01-20240203-132119_vqa_5_anchor_fixed_normalized.json \
+#         scripts/staged_oos_vqa_generation/object_spatial_relation/outputs/generated_vqa/P01-20240203-132119_vqa_30_anchor_fixed_normalized.json \
 #     --output-dir outputs/jsonl_v2 \
-#     --video-root /work/courses/3dv/team1/data/HD-EPIC/Videos/P04_preprocessed \
+#     --video-root /work/courses/3dv/team1/data/HD-EPIC/Videos/P01_preprocessed_with_watermark \
 #     --include-gold-history
