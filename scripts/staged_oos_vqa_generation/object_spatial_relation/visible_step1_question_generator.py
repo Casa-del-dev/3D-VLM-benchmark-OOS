@@ -57,7 +57,7 @@ def _build_step1_visible_yes(
         "step": 1,
         "question_class": "oos_step1_visibility",
         "question": (
-            f"At the current time {time_tok}, is the previously moved "
+            f"At the current time {time_tok}, is the "
             f"{candidate.object_name} visible in the current frame?"
         ),
         "choices": choices,

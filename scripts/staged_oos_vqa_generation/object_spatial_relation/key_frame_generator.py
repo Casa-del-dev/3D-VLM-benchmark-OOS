@@ -847,6 +847,36 @@ def _is_track_state_stably_visible_at_time(
         and state.get("world_coordinates") is not None
     )
 
+def _round_robin_candidates_by_object(
+    candidates_by_object: list[list[KeyFrameCandidate]],
+    max_questions: int,
+    rng: random.Random | None = None,
+) -> list[KeyFrameCandidate]:
+    """Select candidates while spreading questions across objects."""
+    buckets = [list(bucket) for bucket in candidates_by_object if bucket]
+
+    if rng is not None:
+        for bucket in buckets:
+            rng.shuffle(bucket)
+        rng.shuffle(buckets)
+
+    selected: list[KeyFrameCandidate] = []
+
+    while buckets and len(selected) < max_questions:
+        next_buckets: list[list[KeyFrameCandidate]] = []
+
+        for bucket in buckets:
+            if len(selected) >= max_questions:
+                break
+
+            selected.append(bucket.pop(0))
+
+            if bucket:
+                next_buckets.append(bucket)
+
+        buckets = next_buckets
+
+    return selected
 
 def generate_visible_key_frames_for_video(
     video_id: str,
@@ -896,10 +926,10 @@ def generate_visible_key_frames_for_video(
     any_track = next(iter(tracks.values()))
     video_end_sec = max(any_track.sampled_times_sec)
 
-    selected: list[KeyFrameCandidate] = []
+    rng = random.Random((video_id, random_seed, "visible").__repr__())
+    candidates_by_object: list[list[KeyFrameCandidate]] = []
+
     for score in ranked:
-        if len(selected) >= max_questions_per_video:
-            break
 
         if str(score.assoc_id) in ambiguous_assoc_ids:
             print(
@@ -995,12 +1025,14 @@ def generate_visible_key_frames_for_video(
         object_candidates.sort(key=lambda c: c.query_time_sec)
         object_candidates = _order_candidates_by_location_diversity(object_candidates)
 
-        for cand in object_candidates:
-            if len(selected) >= max_questions_per_video:
-                break
-            selected.append(cand)
+        if object_candidates:
+            candidates_by_object.append(object_candidates)
 
-    return selected
+    return _round_robin_candidates_by_object(
+        candidates_by_object,
+        max_questions=max_questions_per_video,
+        rng=rng,
+    )
 
 
 def generate_visible_key_frames_for_videos(
