@@ -8,11 +8,10 @@ inputs:
 # Sampling
 sampling_fps: 1.0
 fps_for_frame_lookup: 30.0
-pre_context_sec: 2.0
 
 # Out-of-sight definition
 out_of_sight_horizon_sec: 5.0
-max_questions_per_video: 1000
+max_questions_per_video: 30
 
 # step 2 last visible observation
 raw_video_width: 1408
@@ -37,7 +36,7 @@ relative:
 random_seed: 42
 
 # Output
-output_json: outputs/generated_vqa/P01-20240203-132119_vqa_5_anchor_fixed_1000.json
+output_json: outputs/generated_vqa/P01-20240203-132119_vqa_visible_30.json
 
 #in_view track
 visibility_tracks_json:

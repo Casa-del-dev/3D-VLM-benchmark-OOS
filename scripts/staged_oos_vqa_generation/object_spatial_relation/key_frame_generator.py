@@ -455,6 +455,7 @@ def _state_at_time(track: ObjectVisibilityTrack, query_time_sec: float, eps: flo
         "status": track.status_samples[best_idx] if best_idx < len(track.status_samples) else None,
         "projected_pixel": track.projected_pixel_samples[best_idx] if best_idx < len(track.projected_pixel_samples) else None,
         "world_coordinates": track.world_coordinate_samples[best_idx] if best_idx < len(track.world_coordinate_samples) else None,
+        "fixture": track.fixture_samples[best_idx] if best_idx < len(track.fixture_samples) else None,
     }
 
 
@@ -562,11 +563,7 @@ def generate_key_frames_for_video(
     fps_for_frame_lookup: float = 30.0,
     intermediate_root: str = DEFAULT_INTERMEDIATE_ROOT,
     centroid_shift_threshold_m: float = 0.15,
-    start_time_sec: float | None = None,
-    end_time_sec: float | None = None,
     random_seed: int = 42,
-    pre_context_sec: float = 2.0,
-    max_random_clip_margin_sec: float = 20.0,
     precomputed_tracks: dict[str, ObjectVisibilityTrack] | None = None,
     precomputed_tracks_json: str | Path | None = None,
 ) -> list[KeyFrameCandidate]:
@@ -673,8 +670,8 @@ def generate_key_frames_for_video(
                 continue
 
             clip_end_time_sec = t_sec
-            clip_start_time_sec = max(video_start_sec, last_visible_time_sec - pre_context_sec)
-            clip_duration_sec = clip_end_time_sec - clip_start_time_sec
+            clip_start_time_sec = 0
+            clip_duration_sec = t_sec
 
             if not _passes_stronger_context_rule(
                 span=span,
@@ -692,7 +689,7 @@ def generate_key_frames_for_video(
             if not _has_prior_stable_visible_context(track, t_sec):
                 continue
 
-            if not (clip_start_time_sec <= last_visible_time_sec < t_sec):
+            if not (0 <= last_visible_time_sec < t_sec):
                 continue
 
             fixture = _fixture_for_object_at_time(video_id, score.assoc_id, t_sec, annotations_root)
@@ -719,7 +716,6 @@ def generate_key_frames_for_video(
                 )
                 continue
 
-            fixture = _fixture_for_object_at_time(video_id, score.assoc_id, t_sec, annotations_root)
             object_candidates.append(
                 KeyFrameCandidate(
                     video_id=video_id,
@@ -763,11 +759,7 @@ def generate_key_frames_for_videos(
     fps_for_frame_lookup: float = 30.0,
     intermediate_root: str = DEFAULT_INTERMEDIATE_ROOT,
     centroid_shift_threshold_m: float = 0.15,
-    start_time_sec: float | None = None,
-    end_time_sec: float | None = None,
     random_seed: int = 42,
-    max_random_clip_margin_sec: float = 20.0,
-    pre_context_sec: float = 2.0,
     precomputed_tracks_by_video: dict[str, dict[str, ObjectVisibilityTrack]] | None = None,
     precomputed_tracks_json_by_video: dict[str, str | Path] | None = None,
 ) -> dict[str, list[KeyFrameCandidate]]:
@@ -790,16 +782,267 @@ def generate_key_frames_for_videos(
             fps_for_frame_lookup=fps_for_frame_lookup,
             intermediate_root=intermediate_root,
             centroid_shift_threshold_m=centroid_shift_threshold_m,
-            start_time_sec=start_time_sec,
-            end_time_sec=end_time_sec,
             random_seed=random_seed,
-            max_random_clip_margin_sec=max_random_clip_margin_sec,
-            pre_context_sec=pre_context_sec,
             precomputed_tracks=tracks,
             precomputed_tracks_json=tracks_json,
         )
     return out
 
+def _select_time_for_visible_span(
+    track: ObjectVisibilityTrack,
+    span: VisibilitySpan,
+    min_context_sec: float = 0.0,
+) -> float | None:
+    """Pick a stable visible sampled time from an in-view span.
+
+    This is the visible-frame counterpart of _select_time_for_oos_span.
+    It only reads the precomputed visibility track, so selection is O(number
+    of samples in the span) and does not call live visibility computation.
+    """
+    if not span.in_view:
+        return None
+
+    left = span.start_sec + max(0.0, min_context_sec)
+    right = span.end_sec
+    if right + 1e-9 < left:
+        return None
+
+    eligible: list[float] = []
+    for t, visible, stable, pixel, world in zip(
+        track.sampled_times_sec,
+        track.visibility_samples,
+        track.stable_visibility_samples,
+        track.projected_pixel_samples,
+        track.world_coordinate_samples,
+    ):
+        if t < left - 1e-9 or t > right + 1e-9:
+            continue
+        if bool(visible) and bool(stable) and pixel is not None and world is not None:
+            eligible.append(float(t))
+
+    if not eligible:
+        return None
+
+    target = (left + right) / 2.0
+    return min(eligible, key=lambda t: abs(t - target))
+
+
+def _is_track_state_stably_visible_at_time(
+    track: ObjectVisibilityTrack,
+    query_time_sec: float,
+) -> bool:
+    state = _state_at_time(track, query_time_sec)
+    if state is None:
+        return False
+
+    times = track.sampled_times_sec
+    if not times:
+        return False
+
+    idx = min(range(len(times)), key=lambda i: abs(float(times[i]) - float(query_time_sec)))
+    return (
+        bool(track.visibility_samples[idx])
+        and bool(track.stable_visibility_samples[idx])
+        and state.get("projected_pixel") is not None
+        and state.get("world_coordinates") is not None
+    )
+
+
+def generate_visible_key_frames_for_video(
+    video_id: str,
+    annotations_root: str | Path,
+    max_questions_per_video: int,
+    sampling_fps: float = 2.0,
+    fps_for_frame_lookup: float = 30.0,
+    intermediate_root: str = DEFAULT_INTERMEDIATE_ROOT,
+    centroid_shift_threshold_m: float = 0.15,
+    random_seed: int = 42,
+    min_visible_context_sec: float = 1,
+    precomputed_tracks: dict[str, ObjectVisibilityTrack] | None = None,
+    precomputed_tracks_json: str | Path | None = None,
+) -> list[KeyFrameCandidate]:
+    """Select query frames where the target object is visible.
+
+    Lightweight: uses precomputed visibility tracks plus assoc/mask metadata.
+    It does not call determine_in_view_objects.
+    """
+    if max_questions_per_video <= 0:
+        return []
+
+    if precomputed_tracks is None:
+        if precomputed_tracks_json is None:
+            raise ValueError(
+                "generate_visible_key_frames_for_video requires precomputed visibility tracks. "
+                "Pass precomputed_tracks or precomputed_tracks_json."
+            )
+        tracks = load_precomputed_visibility_tracks(precomputed_tracks_json)
+    else:
+        tracks = precomputed_tracks
+
+    if not tracks:
+        return []
+
+    ranked = rank_objects_by_relocation(
+        video_id=video_id,
+        annotations_root=annotations_root,
+        centroid_shift_threshold_m=centroid_shift_threshold_m,
+    )
+
+    ambiguous_assoc_ids = _build_ambiguous_assoc_ids_for_video(
+        video_id=video_id,
+        annotations_root=annotations_root,
+    )
+
+    any_track = next(iter(tracks.values()))
+    video_end_sec = max(any_track.sampled_times_sec)
+
+    selected: list[KeyFrameCandidate] = []
+    for score in ranked:
+        if len(selected) >= max_questions_per_video:
+            break
+
+        if str(score.assoc_id) in ambiguous_assoc_ids:
+            print(
+                "[SKIP_AMBIGUOUS_OBJECT_NAME]",
+                {
+                    "video_id": video_id,
+                    "assoc_id": score.assoc_id,
+                    "object_name": score.name,
+                },
+            )
+            continue
+
+        track = tracks.get(score.assoc_id)
+        if track is None:
+            continue
+
+        if len(_get_object_tracks(video_id=video_id, assoc_id=score.assoc_id, annotations_root=annotations_root)) < 1:
+            continue
+
+        object_candidates: list[KeyFrameCandidate] = []
+        for span in track.spans:
+            if not span.in_view:
+                continue
+
+            span_start = float(span.start_sec)
+            span_end = float(span.end_sec)
+
+            if span_end <= span_start:
+                continue
+
+            effective_span = VisibilitySpan(
+                start_sec=span_start,
+                end_sec=span_end,
+                in_view=True,
+            )
+            t_sec = _select_time_for_visible_span(
+                track,
+                effective_span,
+                min_context_sec=min_visible_context_sec,
+            )
+            if t_sec is None:
+                continue
+
+            if not _is_track_state_stably_visible_at_time(track, t_sec):
+                continue
+
+            # Keep "previously moved" grounded.
+            if len(
+                _eligible_prior_tracks(
+                    video_id=video_id,
+                    assoc_id=score.assoc_id,
+                    query_time_sec=t_sec,
+                    annotations_root=annotations_root,
+                )
+            ) == 0:
+                continue
+
+            clip_start_time_sec = 0.0
+            clip_end_time_sec = t_sec
+            clip_duration_sec = t_sec
+
+            if clip_end_time_sec > video_end_sec + 1e-9:
+                continue
+
+            state = _state_at_time(track, t_sec) or {}
+            fixture = state.get("fixture")
+            if fixture is None:
+                fixture = _fixture_for_object_at_time(
+                    video_id,
+                    score.assoc_id,
+                    t_sec,
+                    annotations_root,
+                )
+
+            object_candidates.append(
+                KeyFrameCandidate(
+                    video_id=video_id,
+                    assoc_id=score.assoc_id,
+                    object_name=score.name,
+                    query_time_sec=t_sec,
+                    oos_span_start_sec=span_start,
+                    oos_span_end_sec=span_end,
+                    oos_duration_sec=span_end - span_start,
+                    horizon_sec=0.0,
+                    fixture_at_query=str(fixture) if fixture is not None else None,
+                    relocation_score=score.total_score,
+                    clip_start_time_sec=clip_start_time_sec,
+                    clip_end_time_sec=clip_end_time_sec,
+                    clip_duration_sec=clip_duration_sec,
+                )
+            )
+
+        object_candidates.sort(key=lambda c: c.query_time_sec)
+        object_candidates = _order_candidates_by_location_diversity(object_candidates)
+
+        for cand in object_candidates:
+            if len(selected) >= max_questions_per_video:
+                break
+            selected.append(cand)
+
+    return selected
+
+
+def generate_visible_key_frames_for_videos(
+    video_ids: list[str],
+    annotations_root: str | Path,
+    max_questions_per_video: int,
+    sampling_fps: float = 2.0,
+    fps_for_frame_lookup: float = 30.0,
+    intermediate_root: str = DEFAULT_INTERMEDIATE_ROOT,
+    centroid_shift_threshold_m: float = 0.15,
+    random_seed: int = 42,
+    min_visible_context_sec: float = 0.5,
+    precomputed_tracks_by_video: dict[str, dict[str, ObjectVisibilityTrack]] | None = None,
+    precomputed_tracks_json_by_video: dict[str, str | Path] | None = None,
+) -> dict[str, list[KeyFrameCandidate]]:
+    out: dict[str, list[KeyFrameCandidate]] = {}
+
+    for video_id in video_ids:
+        tracks = None
+        tracks_json = None
+
+        if precomputed_tracks_by_video is not None:
+            tracks = precomputed_tracks_by_video.get(video_id)
+
+        if precomputed_tracks_json_by_video is not None:
+            tracks_json = precomputed_tracks_json_by_video.get(video_id)
+
+        out[video_id] = generate_visible_key_frames_for_video(
+            video_id=video_id,
+            annotations_root=annotations_root,
+            max_questions_per_video=max_questions_per_video,
+            sampling_fps=sampling_fps,
+            fps_for_frame_lookup=fps_for_frame_lookup,
+            intermediate_root=intermediate_root,
+            centroid_shift_threshold_m=centroid_shift_threshold_m,
+            random_seed=random_seed,
+            min_visible_context_sec=min_visible_context_sec,
+            precomputed_tracks=tracks,
+            precomputed_tracks_json=tracks_json,
+        )
+
+    return out
 
 def key_frames_to_dict(candidates: list[KeyFrameCandidate]) -> list[dict[str, Any]]:
     return [
