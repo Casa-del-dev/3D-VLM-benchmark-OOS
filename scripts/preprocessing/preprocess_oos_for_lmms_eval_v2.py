@@ -239,6 +239,48 @@ def trajectory_to_single_turn_examples(
     return examples
 
 
+# def make_multiturn_messages_from_gold(
+#     steps: List[Dict[str, Any]],
+#     include_system_prompt: bool = True,
+#     system_prompt: str = "Answer using only the video evidence available up to the queried time.",
+# ) -> List[Dict[str, Any]]:
+#     messages: List[Dict[str, Any]] = []
+
+#     if include_system_prompt:
+#         messages.append({
+#             "role": "system",
+#             "content": [{"type": "text", "text": system_prompt}],
+#         })
+
+#     for step in steps:
+#         step_id = normalize_step_id(step.get("step"))
+#         qclass = step.get("question_class", "")
+
+#         if step_id in IGNORED_STEP_IDS:
+#             continue
+
+#         # Skip parallel branch questions from gold history
+#         if qclass in {
+#             "oos_branch_object_camera_relative_position",
+#             "oos_branch_object_object_relation",
+#             "oos_branch_object_object_distance",
+#         }:
+#             continue
+
+#         messages.append({
+#             "role": "user",
+#             "content": [{"type": "text", "text": normalize_question_text(step.get("question"))}],
+#         })
+
+#         gold_answer = get_step_target_text(step)
+#         if gold_answer is not None:
+#             messages.append({
+#                 "role": "assistant",
+#                 "content": [{"type": "text", "text": gold_answer}],
+#             })
+
+#     return messages
+
 def make_multiturn_messages_from_gold(
     steps: List[Dict[str, Any]],
     include_system_prompt: bool = True,
@@ -252,6 +294,7 @@ def make_multiturn_messages_from_gold(
             "content": [{"type": "text", "text": system_prompt}],
         })
 
+    usable_steps = []
     for step in steps:
         step_id = normalize_step_id(step.get("step"))
         qclass = step.get("question_class", "")
@@ -267,6 +310,12 @@ def make_multiturn_messages_from_gold(
         }:
             continue
 
+        usable_steps.append(step)
+
+    # Gold history should contain previous steps only, not the final/current step.
+    history_steps = usable_steps[:-1]
+
+    for step in history_steps:
         messages.append({
             "role": "user",
             "content": [{"type": "text", "text": normalize_question_text(step.get("question"))}],
@@ -450,7 +499,7 @@ if __name__ == "__main__":
 
 # python scripts/preprocessing/preprocess_oos_for_lmms_eval_v2.py \
 #     --input \
-#         /Users/fangzhouma/Desktop/3d_vision/3D-VLM-benchmark-OOS/scripts/staged_oos_vqa_generation/object_spatial_relation/outputs/generated_vqa/P01-20240203-132119_vqa_5_anchor_fixed_60_half.json \
+#         /Users/fangzhouma/Desktop/3d_vision/3D-VLM-benchmark-OOS/scripts/staged_oos_vqa_generation/object_spatial_relation/outputs/generated_vqa/P01-20240203-132119_vqa_visible_30_visible_step1.json \
 #     --output-dir outputs/jsonl_v2 \
 #     --video-root /work/courses/3dv/team1/data/HD-EPIC/Videos/P01_preprocessed_with_watermark \
 #     --include-gold-history

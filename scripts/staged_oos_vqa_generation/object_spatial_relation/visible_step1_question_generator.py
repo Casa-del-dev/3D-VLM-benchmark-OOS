@@ -22,36 +22,54 @@ from staged_oos_question_generator import (
     _time_token,
 )
 
+def _finalize_choices(
+    choices: list[str],
+    correct_answer: str,
+    rng: random.Random,
+    *,
+    shuffle: bool = True,
+) -> tuple[list[str], int]:
+    final_choices = list(choices)
+    if shuffle:
+        rng.shuffle(final_choices)
+    correct_idx = final_choices.index(correct_answer)
+    return final_choices, correct_idx
 
 def _build_step1_visible_yes(
     candidate: kfg.KeyFrameCandidate,
     object_state: Any,
     time_tok: str,
+    rng: random.Random,
 ) -> dict[str, Any]:
     """Build a step-1 visibility question whose correct answer is always index 0.
 
     We keep choices unshuffled so this script can generate binary-visible examples
-    with correct_idx == 0, while the original OOS generator remains unchanged.
+    with correct answer being "Yes", while the original OOS generator remains unchanged.
     """
+    correct_answer = "Yes"
+    choices, correct_idx = _finalize_choices(
+        choices=["Yes", "No"],
+        correct_answer=correct_answer,
+        rng=rng,
+        shuffle=True,
+    )
     return {
         "step": 1,
-        "question_class": "visible_step1_visibility",
+        "question_class": "oos_step1_visibility",
         "question": (
             f"At the current time {time_tok}, is the previously moved "
             f"{candidate.object_name} visible in the current frame?"
         ),
-        "choices": ["Yes", "No"],
-        "correct_idx": 0,
+        "choices": choices,
+        "correct_idx": correct_idx,
         "answer_metadata": {
             "status": _state_attr(object_state, "status"),
             "is_visible": _state_attr(object_state, "is_visible"),
             "is_stably_visible": _state_attr(object_state, "is_stably_visible"),
             "projected_pixel": _state_attr(object_state, "projected_pixel"),
             "camera_coordinates": _state_attr(object_state, "camera_coordinates"),
-            "frame_index": _state_attr(object_state, "frame_number"),
-            "correct_answer": "Yes",
-            "correct_answer_index_policy": "Yes is fixed at index 0 for visible-only generation.",
-        },
+            "frame_index": _state_attr(object_state, "frame_number"),        
+            },
     }
 
 
@@ -93,7 +111,7 @@ def generate_visible_benchmark(
 
     # The RNG is kept for deterministic trajectory ids/order if you later add
     # sampling, but this script does not shuffle step-1 choices.
-    random.Random(cfg.random_seed)
+    rng = random.Random(cfg.random_seed)
     horizon_token = _format_horizon_token(cfg.out_of_sight_horizon_sec)
     candidate_pool_per_video = max(cfg.max_questions_per_video * 5, cfg.max_questions_per_video)
 
@@ -143,7 +161,7 @@ def generate_visible_benchmark(
             common["generation_info"]["selector"] = "generate_visible_key_frames_for_videos"
 
             time_tok = _time_token(candidate.query_time_sec, input_key="video 1")
-            step1 = _build_step1_visible_yes(candidate, object_state, time_tok)
+            step1 = _build_step1_visible_yes(candidate, object_state, time_tok, rng=rng)
 
             trajectory_id = f"visible_staged_{horizon_token}_{running_idx}"
             key, payload = _finalize_visible_trajectory(trajectory_id, common, step1)
