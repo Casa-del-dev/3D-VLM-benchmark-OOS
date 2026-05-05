@@ -1,10 +1,11 @@
 annotations_root: ../../../hd-epic-annotations
 intermediate_root: Intermediate_data
 video_root: ../../../data/HD-EPIC/Videos
+kitchen_region_map_json: configs/kitchen_region_maps.json
 
 inputs:
   videos:
-    - P04-20240413-142619
+    - P01-20240203-132119
 
 # Sampling
 sampling_fps: 1.0
@@ -62,8 +63,8 @@ relative:
 random_seed: 42
 
 # Output
-output_json: outputs/generated_vqa/P04-20240413-142619_vqa_5_30.json
+output_json: outputs/generated_vqa/P01-20240203-132119_vqa_5_30_5d.json
 
 #in_view track
 visibility_tracks_json:
-  P04-20240413-142619: outputs/merged_tracks/P04/P04-20240413-142619_merged_visibility_track.json
+  P01-20240203-132119: outputs/merged_tracks/P01/P01-20240203-132119_merged_visibility_track.json

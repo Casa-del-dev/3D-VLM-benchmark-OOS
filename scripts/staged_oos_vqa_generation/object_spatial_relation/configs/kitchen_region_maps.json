@@ -1,0 +1,25 @@
+{
+  "P01": {
+    "counter": {
+      "P01_counter.001": "between the fridge and the hob",
+      "P01_counter.002": "beside the hob and near the sink",
+      "P01_counter.003": "beside the hob and near the sink",
+      "P01_counter.004": "next to the window",
+      "P01_counter.005": "next to the window",
+      "P01_counter.006": "below the boiler",
+      "P01_counter.007": "below the boiler",
+      "P01_counter.008": "close to the microwave",
+      "P01_counter.009": "close to the microwave"
+    }
+  },
+  "P04": {
+    "counter":{
+      "P04_counter.001": "beside the hob and close to the door",
+      "P04_counter.002": "beside the hob and close to the door",
+      "P04_counter.003": "between the hob and the sink",
+      "P04_counter.004": "between the hob and the sink",
+      "P04_counter.005": "between the hob and the sink",
+      "P04_counter.006": "next to the window"
+    }
+  }
+}

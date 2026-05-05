@@ -52,6 +52,7 @@ class BenchmarkConfig:
     raw_video_width: float | None = None
     raw_video_height: float | None = None
     last_placement_source: str = "raw_tracks"  # or "merged_tracks"
+    kitchen_region_map_json: Path | None = None
 
 @dataclass(frozen=True)
 class DetectionFilterConfig:
@@ -697,6 +698,11 @@ def _load_config(path: Path) -> BenchmarkConfig:
         raw_video_width=float(raw["raw_video_width"]) if raw.get("raw_video_width") is not None else None,
         raw_video_height=float(raw["raw_video_height"]) if raw.get("raw_video_height") is not None else None,
         last_placement_source=str(raw.get("last_placement_source", "raw_tracks")),
+        kitchen_region_map_json=(
+            (root / raw["kitchen_region_map_json"]).resolve()
+            if raw.get("kitchen_region_map_json") is not None
+            else None
+        ),
     )
 
 
@@ -803,7 +809,8 @@ def _build_step2_last_visible(
         "question_class": "oos_step2_last_visible",
         "question": (
             #f"At the current time {time_tok}, the {candidate.object_name} that was moved earlier is not visible. "
-            f"When was the previously moved {candidate.object_name} last visible, and where was it located in the image at that moment?"
+            f"The {candidate.object_name} was moved earlier in the video. "
+            f"When was it last visible, and where was it located in the image at that moment?"
         ),
         "choices": [],
         "correct_idx": None,
@@ -845,7 +852,8 @@ def _build_step3_last_placement(
         "question_class": "oos_step3_last_placement",
         "question": (
             #f"At the current time {time_tok}, the {candidate.object_name} that was moved earlier is not visible. "
-            f"At what time did the previously moved {candidate.object_name} stop moving? Where was it located in the image at that moment?"
+            f"The {candidate.object_name} was moved earlier in the video. "
+            f"At what time did it stop moving? Where was it located in the image at that moment?"
         ),
         "choices": [],
         "correct_idx": None,
@@ -882,48 +890,81 @@ def _build_step4_fixture(
     *,
     last_visible: LastVisibleInfo,
     fixture_vocab: list[str],
+    kitchen_region_map: dict[str, Any],
     rng: random.Random,
     cfg: BenchmarkConfig,
 ) -> dict[str, Any]:
     if last_visible.fixture is not None:
         correct_fixture = semantic_fixture_name(last_visible.fixture)
+
         if not correct_fixture:
             raise ValueError(f"Could not normalize fixture {last_visible.fixture!r}")
+
         if _is_invalid_step4_fixture_label(correct_fixture):
             raise ValueError(
                 f"Fixture label {last_visible.fixture!r} normalized to {correct_fixture!r} "
                 "is not valid for step 4 question."
             )
 
-        distractors = sorted({
-            str(f)
-            for f in fixture_vocab
-            if str(f) and str(f) != correct_fixture and not _is_invalid_step4_fixture_label(str(f))
-        })
+        expanded_pool = _build_expanded_step4_choice_pool(
+            fixture_vocab=fixture_vocab,
+            kitchen_region_map=kitchen_region_map,
+            video_id=candidate.video_id,
+        )
 
-        if len(distractors) < cfg.absolute_num_choices - 1:
-            raise ValueError(
-                f"Not enough semantic fixture types for step 3: need {cfg.absolute_num_choices}, "
-                f"but only found {len(distractors) + 1} including the correct answer."
+        if _is_counter_fixture_label(correct_fixture):
+            correct_answer = _counter_area_choice_for_raw_fixture(
+                kitchen_region_map=kitchen_region_map,
+                video_id=candidate.video_id,
+                raw_fixture=str(last_visible.fixture),
             )
 
-        chosen_distractors = rng.sample(distractors, k=cfg.absolute_num_choices - 1)
-        choices = [correct_fixture] + chosen_distractors
+            if correct_answer is None:
+                raise ValueError(
+                    f"Correct fixture is counter, but raw fixture {last_visible.fixture!r} "
+                    "has no matching counter-area description in kitchen_region_map_json."
+                )
+        else:
+            correct_answer = correct_fixture
+
+        if correct_answer not in expanded_pool:
+            expanded_pool.append(correct_answer)
+
+        distractor_pool = [
+            option for option in expanded_pool
+            if option != correct_answer
+        ]
+
+        if len(distractor_pool) < cfg.absolute_num_choices - 1:
+            raise ValueError(
+                f"Not enough step 4 options after expanding counter descriptions: "
+                f"need {cfg.absolute_num_choices}, got {len(distractor_pool) + 1}."
+            )
+
+        chosen_distractors = rng.sample(
+            distractor_pool,
+            k=cfg.absolute_num_choices - 1,
+        )
+
+        choices = [correct_answer] + chosen_distractors
         rng.shuffle(choices)
 
         return {
             "step": 4,
             "question_class": "oos_step4_fixture",
             "question": (
-                f"At the current time {time_tok}, based on the last known position of the {candidate.object_name} that was moved earlier,"
-                f"which fixture is closest to it?"
+                f"At the current time {time_tok}, based on the last known position of "
+                f"the {candidate.object_name} that was moved earlier, "
+                f"which fixture or fixture area is closest to it?"
             ),
             "choices": choices,
-            "correct_idx": choices.index(correct_fixture),
+            "correct_idx": choices.index(correct_answer),
             "answer_metadata": {
                 "reference_time_sec": last_visible.sampled_time_sec,
                 "correct_fixture": correct_fixture,
+                "display_correct_answer": correct_answer,
                 "raw_correct_fixture": str(last_visible.fixture),
+                "expanded_choice_pool": expanded_pool,
                 "reference_source": last_visible.reference_source,
             },
         }
@@ -937,25 +978,166 @@ def _build_step4_fixture(
         fixture_vocabulary=fixture_vocab,
         rng=rng,
     )
-    if _is_invalid_step4_fixture_label(abs_answer.correct_fixture):
-        raise ValueError(f"Invalid step 4 fixture answer: {abs_answer.correct_fixture!r}")
+
+    correct_fixture = abs_answer.correct_fixture
+
+    if _is_invalid_step4_fixture_label(correct_fixture):
+        raise ValueError(f"Invalid step 4 fixture answer: {correct_fixture!r}")
+
+    if _is_counter_fixture_label(correct_fixture):
+        raise ValueError(
+            "Fallback absolute-answer branch produced correct_fixture='counter', "
+            "but no raw counter fixture id is available to map it to a specific counter area."
+        )
+
+    expanded_pool = _build_expanded_step4_choice_pool(
+        fixture_vocab=fixture_vocab,
+        kitchen_region_map=kitchen_region_map,
+        video_id=candidate.video_id,
+    )
+
+    correct_answer = correct_fixture
+
+    if correct_answer not in expanded_pool:
+        expanded_pool.append(correct_answer)
+
+    distractor_pool = [
+        option for option in expanded_pool
+        if option != correct_answer
+    ]
+
+    if len(distractor_pool) < cfg.absolute_num_choices - 1:
+        raise ValueError(
+            f"Not enough step 4 fallback options after expanding counter descriptions: "
+            f"need {cfg.absolute_num_choices}, got {len(distractor_pool) + 1}."
+        )
+
+    chosen_distractors = rng.sample(
+        distractor_pool,
+        k=cfg.absolute_num_choices - 1,
+    )
+
+    choices = [correct_answer] + chosen_distractors
+    rng.shuffle(choices)
 
     return {
         "step": 4,
         "question_class": "oos_step4_fixture",
         "question": (
-            f"At the current time {time_tok}, based on the last known position of the {candidate.object_name} that was moved earlier,"
-            f"which fixture is closest to it?"        
-            ),
-        "choices": abs_answer.choices,
-        "correct_idx": abs_answer.correct_idx,
+            f"At the current time {time_tok}, based on the last known position of "
+            f"the {candidate.object_name} that was moved earlier, "
+            f"which fixture or counter area is closest to it?"
+        ),
+        "choices": choices,
+        "correct_idx": choices.index(correct_answer),
         "answer_metadata": {
             "reference_time_sec": last_visible.sampled_time_sec,
-            "correct_fixture": abs_answer.correct_fixture,
+            "correct_fixture": correct_fixture,
+            "display_correct_answer": correct_answer,
+            "expanded_choice_pool": expanded_pool,
             "reference_source": last_visible.reference_source,
         },
     }
 
+def _load_kitchen_region_map(path: Path | None) -> dict[str, Any]:
+    if path is None:
+        return {}
+    if not path.exists():
+        raise FileNotFoundError(f"kitchen_region_map_json does not exist: {path}")
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _region_map_for_video(
+    kitchen_region_map: dict[str, Any],
+    video_id: str,
+    fixture_type: str,
+) -> dict[str, str]:
+    participant_prefix = str(video_id).split("-", 1)[0]
+    by_participant = kitchen_region_map.get(participant_prefix, {})
+    by_fixture = by_participant.get(fixture_type, {})
+    return {str(k): str(v) for k, v in by_fixture.items()}
+
+def _is_counter_fixture_label(label: str | None) -> bool:
+    return str(label or "").strip().lower() == "counter"
+
+
+def _format_counter_area_description(description: str) -> str:
+    description = str(description).strip()
+    if not description:
+        return "counter area"
+    return f"counter area {description}"
+
+
+def _all_counter_area_choices_for_video(
+    *,
+    kitchen_region_map: dict[str, Any],
+    video_id: str,
+) -> list[str]:
+    counter_map = _region_map_for_video(
+        kitchen_region_map,
+        video_id=video_id,
+        fixture_type="counter",
+    )
+
+    return [
+        _format_counter_area_description(desc)
+        for desc in sorted(set(counter_map.values()))
+        if str(desc).strip()
+    ]
+
+
+def _counter_area_choice_for_raw_fixture(
+    *,
+    kitchen_region_map: dict[str, Any],
+    video_id: str,
+    raw_fixture: str | None,
+) -> str | None:
+    if raw_fixture is None:
+        return None
+
+    counter_map = _region_map_for_video(
+        kitchen_region_map,
+        video_id=video_id,
+        fixture_type="counter",
+    )
+
+    desc = counter_map.get(str(raw_fixture))
+    if desc is None:
+        return None
+
+    return _format_counter_area_description(desc)
+
+
+def _build_expanded_step4_choice_pool(
+    *,
+    fixture_vocab: list[str],
+    kitchen_region_map: dict[str, Any],
+    video_id: str,
+) -> list[str]:
+    counter_area_choices = _all_counter_area_choices_for_video(
+        kitchen_region_map=kitchen_region_map,
+        video_id=video_id,
+    )
+
+    expanded_pool: list[str] = []
+
+    for fixture in fixture_vocab:
+        fixture = str(fixture).strip()
+
+        if not fixture or _is_invalid_step4_fixture_label(fixture):
+            continue
+
+        if _is_counter_fixture_label(fixture):
+            expanded_pool.extend(counter_area_choices)
+        else:
+            expanded_pool.append(fixture)
+
+    seen: set[str] = set()
+    return [
+        option for option in expanded_pool
+        if not (option in seen or seen.add(option))
+    ]
 
 def classify_camera_quadrant_robust(
     camera_coordinates,
@@ -1016,6 +1198,76 @@ def _require_query_time_target_state(
 
     return state
 
+def _build_branch_counter_area(
+    candidate: KeyFrameCandidate,
+    time_tok: str,
+    *,
+    last_visible: LastVisibleInfo,
+    step4_fixture_question: dict[str, Any],
+    kitchen_region_map: dict[str, Any],
+    rng: random.Random,
+    max_choices: int = 5,
+) -> dict[str, Any] | None:
+    step4_meta = step4_fixture_question.get("answer_metadata", {})
+    step4_correct_fixture = str(step4_meta.get("correct_fixture", "")).strip().lower()
+
+    # Only add 5d when step 4's ground-truth answer is counter.
+    if step4_correct_fixture != "counter":
+        return None
+
+    counter_choices_by_id = _region_map_for_video(
+        kitchen_region_map,
+        video_id=candidate.video_id,
+        fixture_type="counter",
+    )
+    if not counter_choices_by_id:
+        return None
+
+    correct_counter_id = step4_meta.get("raw_correct_fixture") or last_visible.fixture
+
+    if correct_counter_id is None or correct_counter_id not in counter_choices_by_id:
+        return None
+
+    correct_answer = counter_choices_by_id[correct_counter_id]
+
+    # Important: deduplicate descriptions, so counter.004/005/006 all become one option.
+    unique_area_descriptions = sorted(set(counter_choices_by_id.values()))
+
+    distractors = [
+        desc for desc in unique_area_descriptions
+        if desc != correct_answer
+    ]
+
+    num_choices = min(max_choices, len(distractors) + 1)
+    chosen_distractors = rng.sample(distractors, k=num_choices - 1)
+
+    choices, correct_idx = _finalize_choices(
+        choices=[correct_answer] + chosen_distractors,
+        correct_answer=correct_answer,
+        rng=rng,
+        shuffle=True,
+    )
+
+    return {
+        "step": "5d",
+        "depends_on_steps": [1, 2, 3, 4],
+        "branch_group": "post_step4",
+        "question_class": "oos_branch_counter_area",
+        "question": (
+            f"At the current time {time_tok}, the previously moved {candidate.object_name} is closest to the counter. Which option best describes the specific counter area? "
+        ),
+        "choices": choices,
+        "correct_idx": correct_idx,
+        "answer_metadata": {
+            "reference_time_sec": last_visible.sampled_time_sec,
+            "correct_counter_id": correct_counter_id,
+            "correct_counter_area": correct_answer,
+            "raw_correct_fixture": correct_counter_id,
+            "step4_correct_fixture": step4_correct_fixture,
+            "reference_source": last_visible.reference_source,
+        },
+    }
+
 def _build_branch_object_camera_relative_position(
     candidate: KeyFrameCandidate,
     time_tok: str,
@@ -1044,8 +1296,10 @@ def _build_branch_object_camera_relative_position(
         "branch_group": "post_step4",
         "question_class": "oos_branch_object_camera_relative_position",
         "question": (
-            f"At the current time {time_tok}, the {candidate.object_name} that was moved earlier is not visible. "
-            f"Based on its last known position, in which direction is the {candidate.object_name} from your viewpoint?"        
+            # f"At the current time {time_tok}, the {candidate.object_name} that was moved earlier is not visible. "
+            # f"Based on its last known position, in which direction is the {candidate.object_name} from your viewpoint?"
+            f"At the current time {time_tok}, consider the {candidate.object_name} that was moved earlier. "
+            f"Using its last known position to infer its current location, in which direction is the {candidate.object_name} from your viewpoint?"   
             ),
         "choices": choices,
         "correct_idx": correct_idx,
@@ -1113,9 +1367,12 @@ def _build_branch_object_object_relation(
         "branch_group": "post_step4",
         "question_class": "oos_branch_object_object_relation",
         "question": (
-            f"At the current time {time_tok}, the {candidate.object_name} that was moved earlier is not visible. "
-            f"Using its last known position to infer where it is now, and using the current position of the {anchor['name']} (marked in red) in the current frame, "
-            f"where is the {candidate.object_name} relative to {anchor['name']} from your viewpoint?"
+            # f"At the current time {time_tok}, the {candidate.object_name} that was moved earlier is not visible. "
+            # f"Using its last known position to infer where it is now, and using the current position of the {anchor['name']} (marked in red) in the current frame, "
+            # f"where is the {candidate.object_name} relative to {anchor['name']} from your viewpoint?"
+            f"At the current time {time_tok}, consider the {candidate.object_name} that was moved earlier. "
+            f"Using its last known position to infer its current location, and using the current position of the {anchor['name']} "
+            f"(marked in red) in the current frame, where is the {candidate.object_name} relative to {anchor['name']} from your viewpoint?"
         ),
         "choices": choices,
         "correct_idx": correct_idx,
@@ -1197,9 +1454,12 @@ def _build_branch_object_object_distance(
         "branch_group": "post_step4",
         "question_class": "oos_branch_object_object_distance",
         "question": (
-            f"At the current time {time_tok}, the {candidate.object_name} that was moved earlier is not visible. "
-            f"Using its last known position to infer where it is now, and using the current position of the {anchor['name']} (marked in red) in the current frame, "
-            f"how far is the {candidate.object_name} from the {anchor['name']}: close, less than 1 meter; medium, at least 1 meter but less than 1.5 meters; or far, 1.5 meters or more?"
+            # f"At the current time {time_tok}, the {candidate.object_name} that was moved earlier is not visible. "
+            # f"Using its last known position to infer where it is now, and using the current position of the {anchor['name']} (marked in red) in the current frame, "
+            # f"how far is the {candidate.object_name} from the {anchor['name']}: close, less than 1 meter; medium, at least 1 meter but less than 1.5 meters; or far, 1.5 meters or more?"
+            f"At the current time {time_tok}, consider the {candidate.object_name} that was moved earlier. "
+            f"Using its last known position to infer its current location, and using the current position of the {anchor['name']} "
+            f"(marked in red) in the current frame, how far is the {candidate.object_name} from the {anchor['name']}: close, less than 1 meter; medium, at least 1 meter but less than 1.5 meters; or far, 1.5 meters or more?"
         ),
         "choices": choices,
         "correct_idx": correct_idx,
@@ -1289,6 +1549,7 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
     rng = random.Random(cfg.random_seed)
     horizon_token = _format_horizon_token(cfg.out_of_sight_horizon_sec)
     fixture_vocab = build_fixture_vocabulary(cfg.annotations_root, video_ids=cfg.video_ids)
+    kitchen_region_map = _load_kitchen_region_map(cfg.kitchen_region_map_json)
     candidate_pool_per_video = cfg.max_questions_per_video
 
     visibility_store = _load_visibility_store(cfg)
@@ -1397,16 +1658,16 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
 
                 incremental_steps.append(_build_step2_last_visible(candidate, time_tok, last_visible, cfg))
                 incremental_steps.append(_build_step3_last_placement(candidate, time_tok, last_placement, cfg))
-                incremental_steps.append(
-                    _build_step4_fixture(
+                step4 = _build_step4_fixture(
                         candidate,
                         time_tok,
-                        last_visible=last_visible,
+                        last_visible=last_placement,
                         fixture_vocab=fixture_vocab,
+                        kitchen_region_map=kitchen_region_map,
                         rng=rng,
                         cfg=cfg,
                     )
-                )
+                incremental_steps.append(step4)
                 
                 target_state_at_query = _require_query_time_target_state(candidate, caches)
 
@@ -1494,6 +1755,18 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
 
                 branch_steps.append(step5b)
                 branch_steps.append(step5c)
+
+                # step5d = _build_branch_counter_area(
+                #     candidate,
+                #     time_tok,
+                #     last_visible=last_placement,
+                #     step4_fixture_question=step4,
+                #     kitchen_region_map=kitchen_region_map,
+                #     rng=rng,
+                # )
+
+                # if step5d is not None:
+                #     branch_steps.append(step5d)
 
                 key, payload = _finalize_trajectory(
                     trajectory_id,

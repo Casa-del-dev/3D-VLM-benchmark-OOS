@@ -171,19 +171,21 @@ def build_text_panel(trajectory_id: str, traj: Dict[str, Any]) -> str:
     step3 = get_step(traj, "3") or get_step_by_class(traj, "oos_step3_last_placement")
     step4 = get_step(traj, 4) or get_step_by_class(traj, "oos_step3_fixture")
 
-    step4a = get_step_by_class(traj, "oos_branch_object_camera_relative_position")
-    step4b = get_step_by_class(traj, "oos_branch_object_object_relation")
-    step4c = get_step_by_class(traj, "oos_branch_object_object_distance")
+    step5a = get_step_by_class(traj, "oos_branch_object_camera_relative_position")
+    step5b = get_step_by_class(traj, "oos_branch_object_object_relation")
+    step5c = get_step_by_class(traj, "oos_branch_object_object_distance")
+    step5d = get_step_by_class(traj, "oos_branch_counter_area")
 
     s1_meta = (step1 or {}).get("answer_metadata", {}) or {}
     s2_meta = (step2 or {}).get("answer_metadata", {}) or {}
     s3_meta = (step3 or {}).get("answer_metadata", {}) or {}
     s4_meta = (step4 or {}).get("answer_metadata", {}) or {}
-    s4a_meta = (step4a or {}).get("answer_metadata", {}) or {}
-    s4b_meta = (step4b or {}).get("answer_metadata", {}) or {}
-    s4c_meta = (step4c or {}).get("answer_metadata", {}) or {}
+    s5a_meta = (step5a or {}).get("answer_metadata", {}) or {}
+    s5b_meta = (step5b or {}).get("answer_metadata", {}) or {}
+    s5c_meta = (step5c or {}).get("answer_metadata", {}) or {}
+    s5d_meta = (step5d or {}).get("answer_metadata", {}) or {}
 
-    anchor_pixel = s4b_meta.get("object_y_projected_pixel", s4b_meta.get("object_y_pixel", "N/A"))
+    anchor_pixel = s5b_meta.get("object_y_projected_pixel", s5b_meta.get("object_y_pixel", "N/A"))
 
     branch_groups = traj.get("branch_groups", {}) or {}
     branch_group_names = list(branch_groups.keys()) if isinstance(branch_groups, dict) else []
@@ -232,22 +234,29 @@ def build_text_panel(trajectory_id: str, traj: Dict[str, Any]) -> str:
         "",
         "=== Branches ===",
         "Branch 5a: object-camera relative position",
-        f"  chosen label: {idx_to_choice((step4a or {}).get('choices', []), (step4a or {}).get('correct_idx'))}",
-        f"  camera_coordinates: {s4a_meta.get('camera_coordinates', 'N/A')}",
-        f"  status: {s4a_meta.get('status', 'N/A')}",
+        f"  chosen label: {idx_to_choice((step5a or {}).get('choices', []), (step5a or {}).get('correct_idx'))}",
+        f"  camera_coordinates: {s5a_meta.get('camera_coordinates', 'N/A')}",
+        f"  status: {s5a_meta.get('status', 'N/A')}",
         "",
         "Branch 5b: object-object relation",
-        f"  chosen label: {idx_to_choice((step4b or {}).get('choices', []), (step4b or {}).get('correct_idx'))}",
-        f"  anchor object: {s4b_meta.get('object_y_name', 'N/A')} ({s4b_meta.get('object_y_assoc_id', 'N/A')})",
+        f"  chosen label: {idx_to_choice((step5b or {}).get('choices', []), (step5b or {}).get('correct_idx'))}",
+        f"  anchor object: {s5b_meta.get('object_y_name', 'N/A')} ({s5b_meta.get('object_y_assoc_id', 'N/A')})",
         f"  anchor pixel: {anchor_pixel}",
-        f"  object_x_world_coordinates: {s4b_meta.get('object_x_world_coordinates', 'N/A')}",
-        f"  object_y_world_coordinates: {s4b_meta.get('object_y_world_coordinates', 'N/A')}",
+        f"  object_x_world_coordinates: {s5b_meta.get('object_x_world_coordinates', 'N/A')}",
+        f"  object_y_world_coordinates: {s5b_meta.get('object_y_world_coordinates', 'N/A')}",
         "",
         "Branch 5c: object-object distance",
-        f"  chosen label: {idx_to_choice((step4c or {}).get('choices', []), (step4c or {}).get('correct_idx'))}",
-        f"  distance_m: {s4c_meta.get('distance_m', 'N/A')}",
-        f"  distance_bucket: {s4c_meta.get('distance_bucket', 'N/A')}",
-        f"  relative vector: {s4c_meta.get('vector_object_x_relative_to_object_y', 'N/A')}",
+        f"  chosen label: {idx_to_choice((step5c or {}).get('choices', []), (step5c or {}).get('correct_idx'))}",
+        f"  distance_m: {s5c_meta.get('distance_m', 'N/A')}",
+        f"  distance_bucket: {s5c_meta.get('distance_bucket', 'N/A')}",
+        f"  relative vector: {s5c_meta.get('vector_object_x_relative_to_object_y', 'N/A')}",
+        "",
+        "Branch 5d: counter-area description",
+        f"  chosen label: {idx_to_choice((step5d or {}).get('choices', []), (step5d or {}).get('correct_idx'))}",
+        f"  choices: {(step5d or {}).get('choices', [])}",
+        f"  correct_counter_area: {s5d_meta.get('correct_counter_area', 'N/A')}",
+        f"  correct_counter_id: {s5d_meta.get('correct_counter_id', 'N/A')}",
+        f"  raw_correct_fixture: {s5d_meta.get('raw_correct_fixture', 'N/A')}",
     ]
     return wrap_lines(lines)
 
@@ -303,16 +312,19 @@ def visualize_one(
     step1 = get_step(traj, 1)
     step2 = get_step(traj, 2)
     step3 = get_step(traj, "3") or get_step_by_class(traj, "oos_step3_last_placement")
-    step4 = get_step(traj, 4) or get_step_by_class(traj, "oos_step3_fixture")
+    step4 = get_step(traj, 4) or get_step_by_class(traj, "oos_step4_fixture")
 
     step5a = get_step_by_class(traj, "oos_branch_object_camera_relative_position")
     step5b = get_step_by_class(traj, "oos_branch_object_object_relation")
     step5c = get_step_by_class(traj, "oos_branch_object_object_distance")
+    step5d = get_step_by_class(traj, "oos_branch_counter_area")
 
     step1_meta = (step1 or {}).get("answer_metadata", {}) or {}
     step2_meta = (step2 or {}).get("answer_metadata", {}) or {}
     step3_meta = (step3 or {}).get("answer_metadata", {}) or {}
     step5b_meta = (step5b or {}).get("answer_metadata", {}) or {}
+    step5c_meta = (step5c or {}).get("answer_metadata", {}) or {}
+    step5d_meta = (step5d or {}).get("answer_metadata", {}) or {}
 
     query_time = float(traj["query_time_sec"])
     last_visible_time = step2_meta.get("sampled_last_visible_time_sec")
@@ -398,7 +410,7 @@ def visualize_one(
     rel_label = idx_to_choice((step5b or {}).get("choices", []), (step5b or {}).get("correct_idx"))
     distance_label = idx_to_choice((step5c or {}).get("choices", []), (step5c or {}).get("correct_idx"))
 
-    draw_quadrant_overlay(ax_query, cam_label, "Branch 4a", box_anchor=(0.05, 0.72))
+    draw_quadrant_overlay(ax_query, cam_label, "Branch 5a", box_anchor=(0.05, 0.72))
     draw_quadrant_overlay(ax_query, rel_label, "Branch 5b", box_anchor=(0.73, 0.72))
 
     ax_query.text(
@@ -409,6 +421,21 @@ def visualize_one(
         fontsize=10,
         bbox=dict(facecolor="white", alpha=0.85, edgecolor="black"),
     )
+
+    if step5d is not None:
+        counter_area_label = idx_to_choice(
+            step5d.get("choices", []),
+            step5d.get("correct_idx"),
+        )
+        ax_query.text(
+            0.02, 0.90,
+            f"Branch 5d counter area: {counter_area_label}",
+            transform=ax_query.transAxes,
+            ha="left",
+            va="top",
+            fontsize=10,
+            bbox=dict(facecolor="white", alpha=0.85, edgecolor="black"),
+        )
     ax_query.axis("off")
 
     # Right: text summary
