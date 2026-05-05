@@ -11,7 +11,7 @@ add_watermark = True
 watermark_style = "plain"  # plain, labeled, token
 
 target_fps = 1
-target_size = (224, 224)
+target_size = (168, 168)
 
 def format_time(seconds: float) -> str:
     h = int(seconds // 3600)
@@ -56,7 +56,7 @@ for video_path in input_dir.glob("*.mp4"):
                 draw = ImageDraw.Draw(img)
                 text = make_text(t)
 
-                font_size = max(8, int(target_size[0] * 0.035))
+                font_size = max(4, int(target_size[0] * 0.035))
                 try:
                     font = ImageFont.truetype("DejaVuSans-Bold.ttf", font_size)
                 except:

@@ -432,7 +432,7 @@ if __name__ == "__main__":
 
 
 # python scripts/staged_oos_vqa_generation/object_spatial_relation/visualize_step1_visible_question.py \
-#   --questions scripts/staged_oos_vqa_generation/object_spatial_relation/outputs/generated_vqa/P01-20240203-132119_vqa_visible_30_visible_step1.json \
-#   --video data/HD-EPIC/Videos/P01/P01-20240203-132119.mp4 \
-#   --output_dir scripts/staged_oos_vqa_generation/object_spatial_relation/outputs/visualizations/P01/P01-20240203-132119_vqa_visible_30_visible_step1 \
+#   --questions scripts/staged_oos_vqa_generation/object_spatial_relation/outputs/generated_vqa/P01-20240202-110250_vqa_visible_30_visible_step1.json \
+#   --video data/HD-EPIC/Videos/P01/P01-20240202-110250.mp4 \
+#   --output_dir scripts/staged_oos_vqa_generation/object_spatial_relation/outputs/visualizations/P01/P01-20240202-110250_vqa_visible_30_visible_step1 \
 #   --num_samples 30

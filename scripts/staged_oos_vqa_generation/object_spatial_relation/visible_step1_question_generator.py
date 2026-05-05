@@ -4,13 +4,16 @@ import argparse
 import json
 import random
 import sys
-from dataclasses import asdict
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
+import re
 
 sys.path.append(str(Path(__file__).resolve().parent))
 
 import key_frame_generator as kfg
+from candidate_detection_filter import CandidateDetectionFilter
+from scripts.visibility_track.detection_refinement import VideoFrameReader
 from staged_oos_question_generator import (
     BenchmarkConfig,
     RuntimeCaches,
@@ -21,6 +24,7 @@ from staged_oos_question_generator import (
     _state_attr,
     _time_token,
 )
+
 
 def _finalize_choices(
     choices: list[str],
@@ -41,10 +45,7 @@ def _build_step1_visible_yes(
     time_tok: str,
     rng: random.Random,
 ) -> dict[str, Any]:
-    """Build a step-1 visibility question whose correct answer is always index 0.
-
-    We keep choices unshuffled so this script can generate binary-visible examples
-    with correct answer being "Yes", while the original OOS generator remains unchanged.
+    """Build a step-1 visibility question 
     """
     correct_answer = "Yes"
     choices, correct_idx = _finalize_choices(
@@ -57,8 +58,7 @@ def _build_step1_visible_yes(
         "step": 1,
         "question_class": "oos_step1_visibility",
         "question": (
-            f"At the current time {time_tok}, is the "
-            f"{candidate.object_name} visible in the current frame?"
+            f"At time {time_tok}, can the {candidate.object_name} that was moved earlier be seen in the current frame?"
         ),
         "choices": choices,
         "correct_idx": correct_idx,
@@ -90,6 +90,13 @@ def _finalize_visible_trajectory(
         "branch_groups": {"post_step3": []},
     }
 
+def _normalize_detic_class_name(name: str) -> str:
+    name = str(name).strip().lower()
+    name = re.sub(r"\s+", " ", name)
+    name = re.sub(r"\d+$", "", name).strip()  # bowl2 -> bowl
+    name = name.replace(",", " ")             # Detic uses comma as separator
+    name = re.sub(r"\s+", " ", name).strip()
+    return name
 
 def _is_visible_track_state(object_state: Any) -> bool:
     if object_state is None:
@@ -101,6 +108,62 @@ def _is_visible_track_state(object_state: Any) -> bool:
     )
 
 
+
+def _candidate_key(candidate: kfg.KeyFrameCandidate) -> tuple[str, str, float]:
+    return (
+        str(candidate.video_id),
+        str(candidate.assoc_id),
+        round(float(candidate.query_time_sec), 6),
+    )
+
+
+def _collect_track_visible_candidates(
+    *,
+    candidates: list[kfg.KeyFrameCandidate],
+    caches: RuntimeCaches,
+) -> tuple[list[kfg.KeyFrameCandidate], dict[tuple[str, str, float], Any]]:
+    """Keep only candidates that the original visibility track says are visible.
+
+    This is only the cheap first-stage filter. The detector is still the final
+    authority before a Yes question is emitted.
+    """
+    visible_candidates: list[kfg.KeyFrameCandidate] = []
+    object_state_by_candidate: dict[tuple[str, str, float], Any] = {}
+
+    for candidate in candidates:
+        states = caches.states_by_assoc_id(candidate.video_id, candidate.query_time_sec)
+        object_state = states.get(candidate.assoc_id)
+
+        if not _is_visible_track_state(object_state):
+            continue
+
+        key = _candidate_key(candidate)
+        object_state_by_candidate[key] = object_state
+        visible_candidates.append(candidate)
+
+    return visible_candidates, object_state_by_candidate
+
+def _limit_candidates_per_object_name(
+    candidates: list[kfg.KeyFrameCandidate],
+    max_per_name: int = 2,
+) -> list[kfg.KeyFrameCandidate]:
+    """Limit how many detector checks/questions come from the same object category."""
+    counts: dict[str, int] = {}
+    out: list[kfg.KeyFrameCandidate] = []
+
+    for candidate in candidates:
+        name = _normalize_detic_class_name(candidate.object_name)
+        if not name:
+            name = str(candidate.object_name).strip().lower()
+
+        if counts.get(name, 0) >= max_per_name:
+            continue
+
+        counts[name] = counts.get(name, 0) + 1
+        out.append(candidate)
+
+    return out
+
 def generate_visible_benchmark(
     cfg: BenchmarkConfig,
     *,
@@ -109,11 +172,8 @@ def generate_visible_benchmark(
     if not cfg.video_ids:
         raise ValueError("No input videos were provided in the config.")
 
-    # The RNG is kept for deterministic trajectory ids/order if you later add
-    # sampling, but this script does not shuffle step-1 choices.
     rng = random.Random(cfg.random_seed)
     horizon_token = _format_horizon_token(cfg.out_of_sight_horizon_sec)
-    candidate_pool_per_video = max(cfg.max_questions_per_video * 5, cfg.max_questions_per_video)
 
     visibility_store = _load_visibility_store(cfg)
     precomputed_tracks_by_video = {
@@ -127,56 +187,163 @@ def generate_visible_benchmark(
             "Set visibility_tracks_json in the config or pass --visibility_tracks_json."
         )
 
-    keyframes_by_video = kfg.generate_visible_key_frames_for_videos(
-        video_ids=cfg.video_ids,
-        annotations_root=cfg.annotations_root,
-        max_questions_per_video=candidate_pool_per_video,
-        sampling_fps=cfg.sampling_fps,
-        fps_for_frame_lookup=cfg.fps_for_frame_lookup,
-        intermediate_root=cfg.intermediate_root,
-        random_seed=cfg.random_seed,
-        min_visible_context_sec=min_visible_context_sec,
-        precomputed_tracks_by_video=precomputed_tracks_by_video,
-    )
-
     caches = RuntimeCaches(cfg, visibility_store)
     results: dict[str, dict[str, Any]] = {}
     running_idx = 0
 
+    # Start with the configured pool, then expand it if detector rejection makes
+    # the accepted count too small. You can also set this optional field under
+    # object_detection_filter in YAML: max_candidate_pool_multiplier: 50
+    start_multiplier = max(1, int(cfg.candidate_pool_multiplier))
+    max_multiplier = max(
+        start_multiplier,
+        int(getattr(cfg.detection, "max_candidate_pool_multiplier", start_multiplier * 8)),
+    )
+
     for video_id in cfg.video_ids:
-        candidates = sorted(keyframes_by_video.get(video_id, []), key=lambda c: c.query_time_sec)
         emitted_for_video = 0
+        rejected: list[dict[str, Any]] = []
+        checked_keys: set[tuple[str, str, float]] = set()
 
-        for candidate in candidates:
-            if emitted_for_video >= cfg.max_questions_per_video:
-                break
+        participant_id = video_id.split("-")[0]
+        video_path = Path(cfg.video_root) / participant_id / f"{video_id}.mp4"
 
-            states = caches.states_by_assoc_id(candidate.video_id, candidate.query_time_sec)
-            object_state = states.get(candidate.assoc_id)
-            if not _is_visible_track_state(object_state):
-                continue
+        # Build a broad vocabulary once from all track-visible candidates at the
+        # largest pool size. This prevents the detector vocabulary from changing
+        # between expansion rounds.
+        vocab_candidates = kfg.generate_visible_key_frames_for_video(
+            video_id=video_id,
+            annotations_root=cfg.annotations_root,
+            max_questions_per_video=cfg.max_questions_per_video,
+            candidate_pool_multiplier=max_multiplier,
+            sampling_fps=cfg.sampling_fps,
+            fps_for_frame_lookup=cfg.fps_for_frame_lookup,
+            intermediate_root=cfg.intermediate_root,
+            random_seed=cfg.random_seed,
+            min_visible_context_sec=min_visible_context_sec,
+            precomputed_tracks=precomputed_tracks_by_video.get(video_id),
+        )
 
-            common = _build_common_fields(candidate)
-            common["generation_info"]["visible_only_generation"] = True
-            common["generation_info"]["selector"] = "generate_visible_key_frames_for_videos"
+        vocab_visible_candidates, _ = _collect_track_visible_candidates(
+            candidates=sorted(vocab_candidates, key=lambda c: c.query_time_sec),
+            caches=caches,
+        )
+        custom_vocabulary_list = sorted({
+            _normalize_detic_class_name(c.object_name)
+            for c in vocab_visible_candidates
+            if _normalize_detic_class_name(c.object_name)
+        })
 
-            time_tok = _time_token(candidate.query_time_sec, input_key="video 1")
-            step1 = _build_step1_visible_yes(candidate, object_state, time_tok, rng=rng)
+        custom_vocabulary = ",".join(custom_vocabulary_list)
 
-            trajectory_id = f"visible_staged_{horizon_token}_{running_idx}"
-            key, payload = _finalize_visible_trajectory(trajectory_id, common, step1)
-            results[key] = payload
-            running_idx += 1
-            emitted_for_video += 1
+        detection_filter = CandidateDetectionFilter(
+            video_id=video_id,
+            video_path=video_path,
+            annotations_root=cfg.annotations_root,
+            intermediate_root=cfg.intermediate_root,
+            video_fps=cfg.fps_for_frame_lookup,
+            det_cfg=cfg.detection,
+            accept_labels=set(cfg.detection.accept_labels),
+            custom_vocabulary=custom_vocabulary,
+        )
+
+        multiplier = start_multiplier
+        with VideoFrameReader(video_path, cfg.fps_for_frame_lookup) as frame_reader:
+            while emitted_for_video < cfg.max_questions_per_video and multiplier <= max_multiplier:
+                candidates = kfg.generate_visible_key_frames_for_video(
+                    video_id=video_id,
+                    annotations_root=cfg.annotations_root,
+                    max_questions_per_video=cfg.max_questions_per_video,
+                    candidate_pool_multiplier=multiplier,
+                    sampling_fps=cfg.sampling_fps,
+                    fps_for_frame_lookup=cfg.fps_for_frame_lookup,
+                    intermediate_root=cfg.intermediate_root,
+                    random_seed=cfg.random_seed,
+                    min_visible_context_sec=min_visible_context_sec,
+                    precomputed_tracks=precomputed_tracks_by_video.get(video_id),
+                )
+                visible_candidates, object_state_by_candidate = _collect_track_visible_candidates(
+                    candidates=sorted(candidates, key=lambda c: c.query_time_sec),
+                    caches=caches,
+                )
+
+                made_progress_this_round = False
+                for candidate in visible_candidates:
+                    if emitted_for_video >= cfg.max_questions_per_video:
+                        break
+
+                    candidate_key = _candidate_key(candidate)
+                    if candidate_key in checked_keys:
+                        continue
+                    checked_keys.add(candidate_key)
+
+                    decision = detection_filter.check_one(candidate, frame_reader)
+
+                    if not decision.accepted:
+                        rejected.append({
+                            "video_id": candidate.video_id,
+                            "assoc_id": candidate.assoc_id,
+                            "object_name": candidate.object_name,
+                            "query_time_sec": candidate.query_time_sec,
+                            "detection": decision.metadata,
+                        })
+                        continue
+
+                    object_state = object_state_by_candidate[candidate_key]
+
+                    common = _build_common_fields(candidate)
+                    common["generation_info"]["visible_only_generation"] = True
+                    common["generation_info"]["selector"] = "generate_visible_key_frames_for_video"
+                    common["generation_info"]["detector_verified"] = True
+                    common["generation_info"]["detector_metadata"] = decision.metadata
+
+                    time_tok = _time_token(candidate.query_time_sec, input_key="video 1")
+                    step1 = _build_step1_visible_yes(candidate, object_state, time_tok, rng=rng)
+
+                    trajectory_id = f"visible_staged_{horizon_token}_{running_idx}"
+                    result_key, payload = _finalize_visible_trajectory(trajectory_id, common, step1)
+
+                    results[result_key] = payload
+                    print(f"[ACCEPTED] {result_key} from candidate {candidate_key} (pool x{multiplier})")
+                    running_idx += 1
+                    emitted_for_video += 1
+                    made_progress_this_round = True
+
+                if emitted_for_video >= cfg.max_questions_per_video:
+                    break
+
+                next_multiplier = multiplier * 2
+                if next_multiplier > max_multiplier:
+                    break
+                if not made_progress_this_round and len(checked_keys) >= len(visible_candidates):
+                    # The current pool is exhausted; expand the pool and try new
+                    # candidates rather than stopping early.
+                    pass
+                multiplier = next_multiplier
+                print(
+                    f"[INFO] video {video_id}: detector accepted {emitted_for_video}/"
+                    f"{cfg.max_questions_per_video}; expanding candidate_pool_multiplier to {multiplier}"
+                )
+
+        rejected_path = (
+            cfg.output_json.parent
+            / "detector_debug"
+            / f"{video_id}_visible_step1_rejected_by_detector.json"
+        )
+
+        rejected_path.parent.mkdir(parents=True, exist_ok=True)
+        with rejected_path.open("w", encoding="utf-8") as f:
+            json.dump(rejected, f, indent=2, ensure_ascii=False)
 
         if emitted_for_video < cfg.max_questions_per_video:
             print(
                 f"[WARN] video {video_id}: emitted {emitted_for_video}/{cfg.max_questions_per_video} "
-                "visible step-1 trajectories. Candidate pool may be too small."
+                f"visible step-1 trajectories after detector filtering. Tried "
+                f"{len(checked_keys)} candidates up to candidate_pool_multiplier={max_multiplier}. "
+                "There may not be enough detector-verified visible samples."
             )
 
     return results
-
 
 def save_benchmark_json(items: dict[str, dict[str, Any]], output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -235,12 +402,10 @@ def main() -> None:
         visibility_tracks_json_by_video[cfg.video_ids[0]] = args.visibility_tracks_json.resolve()
 
 
-    cfg = BenchmarkConfig(
-        **{
-            **asdict(cfg),
-            "output_json": output_json,
-            "visibility_tracks_json_by_video": visibility_tracks_json_by_video,
-        }
+    cfg = replace(
+        cfg,
+        output_json=output_json,
+        visibility_tracks_json_by_video=visibility_tracks_json_by_video,
     )
 
     benchmark = generate_visible_benchmark(

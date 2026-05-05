@@ -60,6 +60,7 @@ class DeticDetector:
         self.confidence_threshold = float(confidence_threshold)
         self.device = device
         self.one_class_per_proposal = bool(one_class_per_proposal)
+        self._classifier_cache = {}
 
         if not self.detic_root.exists():
             raise FileNotFoundError(f"detic_root does not exist: {self.detic_root}")
@@ -73,6 +74,10 @@ class DeticDetector:
         self.predictor = self._build_predictor()
         self.metadata = None
         self.class_names: List[str] = []
+
+        # Build CLIP text encoder once. Otherwise every vocabulary reset reloads CLIP.
+        self.text_encoder = self.build_text_encoder(pretrain=True)
+        self.text_encoder.eval()
 
         # Initialize classifier once. For ROI testing this is usually enough.
         self.set_vocabulary(vocabulary=self.vocabulary, custom_vocabulary=self.custom_vocabulary)
@@ -181,11 +186,16 @@ class DeticDetector:
 
         return predictor
 
+    # def _get_clip_embeddings(self, vocabulary: Sequence[str], prompt: str = "a "):
+    #     text_encoder = self.build_text_encoder(pretrain=True)
+    #     text_encoder.eval()
+    #     texts = [prompt + x for x in vocabulary]
+    #     emb = text_encoder(texts).detach().permute(1, 0).contiguous().cpu()
+    #     return emb
+
     def _get_clip_embeddings(self, vocabulary: Sequence[str], prompt: str = "a "):
-        text_encoder = self.build_text_encoder(pretrain=True)
-        text_encoder.eval()
         texts = [prompt + x for x in vocabulary]
-        emb = text_encoder(texts).detach().permute(1, 0).contiguous().cpu()
+        emb = self.text_encoder(texts).detach().permute(1, 0).contiguous().cpu()
         return emb
 
     @staticmethod
@@ -226,7 +236,11 @@ class DeticDetector:
             names = self._normalize_custom_vocabulary(None, custom_vocabulary or self.custom_vocabulary)
             self.metadata = self.MetadataCatalog.get(f"custom_detic_{time.time()}")
             self.metadata.thing_classes = names
-            classifier = self._get_clip_embeddings(names)
+            #classifier = self._get_clip_embeddings(names)
+            cache_key = tuple(names)
+            if cache_key not in self._classifier_cache:
+                self._classifier_cache[cache_key] = self._get_clip_embeddings(names)
+            classifier = self._classifier_cache[cache_key]
             num_classes = len(names)
             self.class_names = names
         else:

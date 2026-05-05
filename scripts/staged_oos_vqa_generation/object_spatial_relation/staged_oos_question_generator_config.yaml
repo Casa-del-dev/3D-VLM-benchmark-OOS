@@ -1,9 +1,10 @@
 annotations_root: ../../../hd-epic-annotations
 intermediate_root: Intermediate_data
+video_root: ../../../data/HD-EPIC/Videos
 
 inputs:
   videos:
-    - P01-20240203-132119
+    - P04-20240413-142619
 
 # Sampling
 sampling_fps: 1.0
@@ -12,6 +13,31 @@ fps_for_frame_lookup: 30.0
 # Out-of-sight definition
 out_of_sight_horizon_sec: 5.0
 max_questions_per_video: 30
+
+object_detection_filter:
+  enabled: true
+  candidate_pool_multiplier: 5
+  accept_labels:
+    - visible
+  save_rejected_candidates: true
+
+  backend: detic
+
+  detic_root: /Users/fangzhouma/Desktop/3d_vision/FIction-Detic
+
+  # choose one model
+  config_file: configs/Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.yaml
+  weights: models/Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.pth
+
+  vocabulary: custom
+  device: cpu
+  roi_scale: 1.8
+  box_threshold: 0.25
+  text_threshold: 0.25
+  visible_threshold: 0.5
+  partial_threshold: 0.35
+  uncertainty_px: 40
+  default_expected_size_px: 120
 
 # step 2 last visible observation
 raw_video_width: 1408
@@ -36,9 +62,8 @@ relative:
 random_seed: 42
 
 # Output
-output_json: outputs/generated_vqa/P01-20240203-132119_vqa_visible_30.json
+output_json: outputs/generated_vqa/P04-20240413-142619_vqa_5_30.json
 
 #in_view track
 visibility_tracks_json:
-  P01-20240203-132119: outputs/merged_tracks/P01/P01-20240203-132119_merged_visibility_track.json
-
+  P04-20240413-142619: outputs/merged_tracks/P04/P04-20240413-142619_merged_visibility_track.json

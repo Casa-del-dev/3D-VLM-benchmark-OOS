@@ -77,12 +77,60 @@ def _load_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
 
+# def _normalize_object_name_for_ambiguity(name: str) -> str:
+#     s = str(name).strip().lower()
+#     s = re.sub(r"\s+", " ", s)
+#     # remove trailing digits, e.g. bowl2 -> bowl, black jar1 -> black jar
+#     s = re.sub(r"\d+$", "", s).strip()
+#     return s
+
 def _normalize_object_name_for_ambiguity(name: str) -> str:
     s = str(name).strip().lower()
     s = re.sub(r"\s+", " ", s)
-    # remove trailing digits, e.g. bowl2 -> bowl, black jar1 -> black jar
+    s = s.replace(",", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+
+    # bowl2 -> bowl, orange3 -> orange
     s = re.sub(r"\d+$", "", s).strip()
+
+    # Remove only ordinal/disambiguating prefixes.
+    # This groups "first orange", "second orange", "another orange".
+    s = re.sub(
+        r"^(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|another|other)\s+",
+        "",
+        s,
+    ).strip()
+
+    # Normalize "first half of onion" and "another half of onion"
+    # but DO NOT normalize "pack of orange", "bag of apples", etc.
+    s = re.sub(
+        r"^(first|second|third|fourth|fifth|another|other)\s+half\s+of\s+",
+        "",
+        s,
+    ).strip()
+
     return s
+
+# def _normalize_object_name_for_ambiguity(name: str) -> str:
+#     s = str(name).strip().lower()
+#     s = s.replace(",", " ")
+#     s = re.sub(r"\s+", " ", s)
+
+#     # Remove trailing digits only: bowl2 -> bowl
+#     s = re.sub(r"\d+$", "", s).strip()
+
+#     # Remove ordinal instance words, but preserve structure words like
+#     # left/right/half/pack.
+#     s = re.sub(
+#         r"\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\b",
+#         "",
+#         s,
+#     )
+
+#     # Clean spaces after removals
+#     s = re.sub(r"\s+", " ", s).strip()
+
+#     return s
 
 def _build_ambiguous_assoc_ids_for_video(
     video_id: str,
@@ -516,6 +564,26 @@ def _eligible_anchor_objects_at_time(
 #         annotations_root=annotations_root,
 #     )) > 0
 
+def _is_projected_pixel_inside_margin(
+    projected_pixel: list[float] | None,
+    image_width: float,
+    image_height: float,
+    margin_ratio: float = 0.10,
+) -> bool:
+    if projected_pixel is None or len(projected_pixel) < 2:
+        return False
+
+    x = float(projected_pixel[0])
+    y = float(projected_pixel[1])
+
+    margin_x = float(image_width) * margin_ratio
+    margin_y = float(image_height) * margin_ratio
+
+    return (
+        margin_x <= x <= float(image_width) - margin_x
+        and margin_y <= y <= float(image_height) - margin_y
+    )
+
 def _pick_valid_anchor_at_time(
     video_id: str,
     tracks: dict[str, ObjectVisibilityTrack],
@@ -524,6 +592,8 @@ def _pick_valid_anchor_at_time(
     annotations_root: str | Path,
     fps_for_frame_lookup: float = 30.0,
     intermediate_root: str = DEFAULT_INTERMEDIATE_ROOT,
+    boundary_margin_ratio: float = 0.10,
+    rng: random.Random | None = None,
 ) -> dict[str, Any] | None:
     eligible = _eligible_anchor_objects_at_time(
         video_id=video_id,
@@ -542,23 +612,29 @@ def _pick_valid_anchor_at_time(
         fps=fps_for_frame_lookup,
         intermediate_root=intermediate_root,
     )
-    cx = float(ctx.image_width) / 2.0
-    cy = float(ctx.image_height) / 2.0
 
-    return min(
-        eligible,
-        key=lambda s: (
-            float(s["projected_pixel"][0]) - cx
-        ) ** 2 + (
-            float(s["projected_pixel"][1]) - cy
-        ) ** 2,
-    )
+    eligible_inside = [
+        s for s in eligible
+        if _is_projected_pixel_inside_margin(
+            s.get("projected_pixel"),
+            image_width=float(ctx.image_width),
+            image_height=float(ctx.image_height),
+            margin_ratio=boundary_margin_ratio,
+        )
+    ]
+
+    if not eligible_inside:
+        return None
+
+    rng = rng or random
+    return rng.choice(eligible_inside)
 
 def generate_key_frames_for_video(
     video_id: str,
     annotations_root: str | Path,
     horizon_sec: float,
     max_questions_per_video: int,
+    candidate_pool_multiplier: int = 5,
     sampling_fps: float = 2.0,
     fps_for_frame_lookup: float = 30.0,
     intermediate_root: str = DEFAULT_INTERMEDIATE_ROOT,
@@ -571,6 +647,7 @@ def generate_key_frames_for_video(
         raise ValueError("horizon_sec must be > 0")
     if max_questions_per_video <= 0:
         return []
+    candidate_pool_size = max_questions_per_video * max(1, candidate_pool_multiplier)
 
     if precomputed_tracks is None:
         if precomputed_tracks_json is None:
@@ -586,6 +663,8 @@ def generate_key_frames_for_video(
         return []
 
     rng = random.Random((video_id, random_seed).__repr__())
+
+    seen_candidate_keys: set[tuple[str, str, float]] = set()
 
     ranked = rank_objects_by_relocation(
         video_id=video_id,
@@ -603,7 +682,7 @@ def generate_key_frames_for_video(
     video_end_sec = max(any_track.sampled_times_sec)
     step_sec = 1.0 / sampling_fps
 
-    selected: list[KeyFrameCandidate] = []
+    candidates_by_object: list[list[KeyFrameCandidate]] = []
     for score in ranked:
         # skip objects with ambiguous names to avoid confusion in the generated questions
         if str(score.assoc_id) in ambiguous_assoc_ids:
@@ -616,8 +695,8 @@ def generate_key_frames_for_video(
                 },
             )
             continue
-        if len(selected) >= max_questions_per_video:
-            break
+        # if len(selected) >= candidate_pool_size:
+        #     break
 
         track = tracks.get(score.assoc_id)
         if track is None:
@@ -701,6 +780,8 @@ def generate_key_frames_for_video(
                 annotations_root=annotations_root,
                 fps_for_frame_lookup=fps_for_frame_lookup,
                 intermediate_root=intermediate_root,
+                boundary_margin_ratio=0.05,
+                rng=rng,
             )
             if anchor is None:
                 print(
@@ -716,6 +797,16 @@ def generate_key_frames_for_video(
                 )
                 continue
 
+            dedup_key = (
+                str(video_id),
+                str(score.assoc_id),
+                round(float(t_sec), 3),
+            )
+
+            if dedup_key in seen_candidate_keys:
+                continue
+
+            seen_candidate_keys.add(dedup_key)
             object_candidates.append(
                 KeyFrameCandidate(
                     video_id=video_id,
@@ -742,10 +833,20 @@ def generate_key_frames_for_video(
 
         object_candidates.sort(key=lambda c: c.query_time_sec)
         object_candidates = _order_candidates_by_location_diversity(object_candidates)
+
+        if object_candidates:
+            candidates_by_object.append(object_candidates)
+
+    selected: list[KeyFrameCandidate] = []
+
+    for object_candidates in candidates_by_object:
         for cand in object_candidates:
-            if len(selected) >= max_questions_per_video:
+            if len(selected) >= candidate_pool_size:
                 break
             selected.append(cand)
+
+        if len(selected) >= candidate_pool_size:
+            break
 
     return selected
 
@@ -755,6 +856,7 @@ def generate_key_frames_for_videos(
     annotations_root: str | Path,
     horizon_sec: float,
     max_questions_per_video: int,
+    candidate_pool_multiplier: int = 5, 
     sampling_fps: float = 2.0,
     fps_for_frame_lookup: float = 30.0,
     intermediate_root: str = DEFAULT_INTERMEDIATE_ROOT,
@@ -778,6 +880,7 @@ def generate_key_frames_for_videos(
             annotations_root=annotations_root,
             horizon_sec=horizon_sec,
             max_questions_per_video=max_questions_per_video,
+            candidate_pool_multiplier=candidate_pool_multiplier,
             sampling_fps=sampling_fps,
             fps_for_frame_lookup=fps_for_frame_lookup,
             intermediate_root=intermediate_root,
@@ -882,6 +985,7 @@ def generate_visible_key_frames_for_video(
     video_id: str,
     annotations_root: str | Path,
     max_questions_per_video: int,
+    candidate_pool_multiplier: int = 5,
     sampling_fps: float = 2.0,
     fps_for_frame_lookup: float = 30.0,
     intermediate_root: str = DEFAULT_INTERMEDIATE_ROOT,
@@ -898,6 +1002,7 @@ def generate_visible_key_frames_for_video(
     """
     if max_questions_per_video <= 0:
         return []
+    candidate_pool_size = max_questions_per_video * max(1, candidate_pool_multiplier)
 
     if precomputed_tracks is None:
         if precomputed_tracks_json is None:
@@ -1030,7 +1135,7 @@ def generate_visible_key_frames_for_video(
 
     return _round_robin_candidates_by_object(
         candidates_by_object,
-        max_questions=max_questions_per_video,
+        max_questions=candidate_pool_size,
         rng=rng,
     )
 
@@ -1039,6 +1144,7 @@ def generate_visible_key_frames_for_videos(
     video_ids: list[str],
     annotations_root: str | Path,
     max_questions_per_video: int,
+    candidate_pool_multiplier: int = 5,
     sampling_fps: float = 2.0,
     fps_for_frame_lookup: float = 30.0,
     intermediate_root: str = DEFAULT_INTERMEDIATE_ROOT,
@@ -1064,6 +1170,7 @@ def generate_visible_key_frames_for_videos(
             video_id=video_id,
             annotations_root=annotations_root,
             max_questions_per_video=max_questions_per_video,
+            candidate_pool_multiplier=candidate_pool_multiplier,
             sampling_fps=sampling_fps,
             fps_for_frame_lookup=fps_for_frame_lookup,
             intermediate_root=intermediate_root,

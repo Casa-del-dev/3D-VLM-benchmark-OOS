@@ -29,17 +29,20 @@ from in_view_determination import (
 )
 from key_frame_generator import ObjectVisibilityTrack, VisibilitySpan, KeyFrameCandidate
 from anchored_coords import relation_from_world_points
-from relative_answer_determ import determine_relative_answer_from_vector, determine_relative_answer_from_vector
+from relative_answer_determ import determine_relative_answer_from_vector
 
 
 @dataclass(frozen=True)
 class BenchmarkConfig:
     annotations_root: Path
+    video_root: Path
     video_ids: list[str]
     sampling_fps: float = 2.0
     fps_for_frame_lookup: float = 30.0
     out_of_sight_horizon_sec: float = 2.0
     max_questions_per_video: int = 20
+    candidate_pool_multiplier: int = 5
+    detection: DetectionFilterConfig | None = None
     absolute_num_choices: int = 5
     random_seed: int = 42
     intermediate_root: str = DEFAULT_INTERMEDIATE_ROOT
@@ -50,6 +53,25 @@ class BenchmarkConfig:
     raw_video_height: float | None = None
     last_placement_source: str = "raw_tracks"  # or "merged_tracks"
 
+@dataclass(frozen=True)
+class DetectionFilterConfig:
+    enabled: bool = True
+    accept_labels: tuple[str, ...] = ("visible",)
+
+    backend: str = "detic"
+    detic_root: Path | None = None
+    config_file: Path | None = None
+    weights: Path | None = None
+    vocabulary: str = "custom"
+    device: str = "cuda"
+
+    roi_scale: float = 1.8
+    box_threshold: float = 0.25
+    text_threshold: float = 0.25
+    visible_threshold: float = 0.35
+    partial_threshold: float = 0.18
+    uncertainty_px: int = 40
+    default_expected_size_px: int = 120
 
 @dataclass(frozen=True)
 class LastVisibleInfo:
@@ -71,7 +93,6 @@ CAMERA_QUADRANT_CHOICES = [
 ]
 
 DISTANCE_CHOICES = [
-    "very close",
     "close",
     "medium",
     "far",
@@ -600,6 +621,46 @@ def _parse_visibility_tracks_json(
         "visibility_tracks_json must be either a string path or a mapping from video_id to path."
     )
 
+def _parse_detection_filter_config(raw: dict[str, Any], root: Path) -> DetectionFilterConfig:
+    det_raw = (
+        raw.get("object_detection_filter")
+        or raw.get("object_detection")
+        or {}
+    )
+
+    def resolve_optional_path(value: Any, base: Path) -> Path | None:
+        if value is None:
+            return None
+        p = Path(str(value)).expanduser()
+        if p.is_absolute():
+            return p.resolve()
+        return (base / p).resolve()
+
+    detic_root = resolve_optional_path(det_raw.get("detic_root"), root)
+
+    # Important:
+    # config_file and weights should be relative to detic_root, not config YAML folder.
+    detic_base = detic_root if detic_root is not None else root
+
+    return DetectionFilterConfig(
+        enabled=bool(det_raw.get("enabled", True)),
+        accept_labels=tuple(det_raw.get("accept_labels", ["visible"])),
+
+        backend=str(det_raw.get("backend", "detic")),
+        detic_root=detic_root,
+        config_file=resolve_optional_path(det_raw.get("config_file"), detic_base),
+        weights=resolve_optional_path(det_raw.get("weights"), detic_base),
+        vocabulary=str(det_raw.get("vocabulary", "custom")),
+        device=str(det_raw.get("device", "cuda")),
+
+        roi_scale=float(det_raw.get("roi_scale", 1.8)),
+        box_threshold=float(det_raw.get("box_threshold", 0.25)),
+        text_threshold=float(det_raw.get("text_threshold", 0.25)),
+        visible_threshold=float(det_raw.get("visible_threshold", 0.35)),
+        partial_threshold=float(det_raw.get("partial_threshold", 0.18)),
+        uncertainty_px=int(det_raw.get("uncertainty_px", 40)),
+        default_expected_size_px=int(det_raw.get("default_expected_size_px", 120)),
+    )
 
 
 def _load_config(path: Path) -> BenchmarkConfig:
@@ -610,11 +671,19 @@ def _load_config(path: Path) -> BenchmarkConfig:
 
     return BenchmarkConfig(
         annotations_root=(root / raw["annotations_root"]).resolve(),
+        video_root=(root / raw["video_root"]).resolve(),
         video_ids=video_ids,
         sampling_fps=float(raw.get("sampling_fps", 2.0)),
         fps_for_frame_lookup=float(raw.get("fps_for_frame_lookup", 30.0)),
         out_of_sight_horizon_sec=float(raw.get("out_of_sight_horizon_sec", 2.0)),
         max_questions_per_video=int(raw.get("max_questions_per_video", 20)),
+        candidate_pool_multiplier=int(
+            raw.get(
+                "candidate_pool_multiplier",
+                (raw.get("object_detection_filter") or {}).get("candidate_pool_multiplier", 5),
+            )
+        ),
+        detection=_parse_detection_filter_config(raw,root),
         absolute_num_choices=int(raw.get("absolute", {}).get("num_choices", 5)),
         random_seed=int(raw.get("random_seed", 42)),
         intermediate_root=str(raw.get("intermediate_root", DEFAULT_INTERMEDIATE_ROOT)),
@@ -687,56 +756,6 @@ ANCHOR_STABLE_VISIBLE_STATUSES = {
     "observed_visible_in_open_fixture",
 }
 
-def _pick_branch_anchor(
-    candidate: KeyFrameCandidate,
-    cfg: BenchmarkConfig,
-    caches: RuntimeCaches,
-) -> dict[str, Any] | None:
-    states = caches.states_by_assoc_id(candidate.video_id, candidate.query_time_sec)
-    if not states:
-        return None
-
-    ctx = load_frame_context(
-        video_id=candidate.video_id,
-        time_sec=candidate.query_time_sec,
-        annotations_root=cfg.annotations_root,
-        fps=cfg.fps_for_frame_lookup,
-    )
-    cx = float(ctx.image_width) / 2.0
-    cy = float(ctx.image_height) / 2.0
-
-    visible = []
-    for assoc_id, s in states.items():
-        if str(assoc_id) == str(candidate.assoc_id):
-            continue
-        if s.get("status") not in ANCHOR_STABLE_VISIBLE_STATUSES:
-            continue
-        if s.get("projected_pixel") is None:
-            continue
-        if s.get("world_coordinates") is None:
-            continue
-        visible.append(s)
-
-    if not visible:
-        return None
-
-    best = min(
-        visible,
-        key=lambda s: (float(s["projected_pixel"][0]) - cx) ** 2
-                    + (float(s["projected_pixel"][1]) - cy) ** 2,
-    )
-
-    return {
-        "assoc_id": str(best["assoc_id"]),
-        "name": str(best.get("name", best["assoc_id"])),
-        "projected_pixel": best.get("projected_pixel"),
-        "world_coordinates": best.get("world_coordinates"),
-        "camera_coordinates": best.get("camera_coordinates"),
-        "status": best.get("status"),
-        "reference_source": "precomputed_visibility_track"
-            if caches.visibility_store.has_video(candidate.video_id)
-            else "live_visibility_state",
-    }
 
 def _build_step1_visibility(candidate: KeyFrameCandidate, object_state: Any, time_tok: str, rng) -> dict[str, Any]:
     is_visible = _is_visible_state(object_state)
@@ -1054,6 +1073,7 @@ def _build_branch_object_object_relation(
     anchor: dict[str, Any],
     target_state_at_query: dict[str, Any],
     cfg: BenchmarkConfig,
+    rng: random.Random,
 ) -> dict[str, Any]:
     if target_state_at_query.get("world_coordinates") is None:
         raise ValueError("Query-time target state has no world coordinates")
@@ -1077,6 +1097,16 @@ def _build_branch_object_object_relation(
 
     rel_answer = determine_relative_answer_from_vector(vector)
 
+    correct_answer = rel_answer.choices[rel_answer.correct_idx]
+
+    choices, correct_idx = _finalize_choices(
+        choices=rel_answer.choices,
+        correct_answer=correct_answer,
+        rng=rng,
+        shuffle=True,
+    )
+
+
     return {
         "step": "5b",
         "depends_on_steps": [1, 2, 3, 4],
@@ -1084,12 +1114,12 @@ def _build_branch_object_object_relation(
         "question_class": "oos_branch_object_object_relation",
         "question": (
             f"At the current time {time_tok}, the {candidate.object_name} that was moved earlier is not visible. "
-            f"Based on the last known position of the {candidate.object_name} and the position of the marked {anchor['name']} in the current frame, "
+            f"Using its last known position to infer where it is now, and using the current position of the {anchor['name']} (marked in red) in the current frame, "
             f"where is the {candidate.object_name} relative to {anchor['name']} from your viewpoint?"
         ),
-        "choices": rel_answer.choices,
-        "correct_idx": rel_answer.correct_idx,
-        "acceptable_idxs": rel_answer.acceptable_idxs,
+        "choices": choices,
+        "correct_idx": correct_idx,
+        "acceptable_idxs": [correct_idx],
         "answer_metadata": {
             "object_x_assoc_id": candidate.assoc_id,
             "object_x_name": candidate.object_name,
@@ -1110,11 +1140,9 @@ def _build_branch_object_object_relation(
 def classify_distance_bucket(distance_m: float) -> str | None:
     if distance_m is None:
         return None
-    if distance_m < 0.5:
-        return "very close"
     if distance_m < 1.0:
         return "close"
-    if distance_m < 2.0:
+    if distance_m < 1.5:
         return "medium"
     return "far"
 
@@ -1170,8 +1198,8 @@ def _build_branch_object_object_distance(
         "question_class": "oos_branch_object_object_distance",
         "question": (
             f"At the current time {time_tok}, the {candidate.object_name} that was moved earlier is not visible. "
-            f"Based on the last known position of the {candidate.object_name}, and the position of the marked {anchor['name']} in the current frame, "
-            f"how far is the {candidate.object_name} from the{anchor['name']}?"
+            f"Using its last known position to infer where it is now, and using the current position of the {anchor['name']} (marked in red) in the current frame, "
+            f"how far is the {candidate.object_name} from the {anchor['name']}: close, less than 1 meter; medium, at least 1 meter but less than 1.5 meters; or far, 1.5 meters or more?"
         ),
         "choices": choices,
         "correct_idx": correct_idx,
@@ -1214,7 +1242,7 @@ def _finalize_trajectory(
         "stop_reason": stop_reason,
         "incremental_steps": incremental_steps,
         "branch_groups": {
-            "post_step3": branch_steps,
+            "post_step4": branch_steps,
         },
     }
 
@@ -1254,103 +1282,6 @@ def _anchor_from_candidate(candidate: KeyFrameCandidate) -> dict[str, Any] | Non
         "reference_source": "key_frame_generator_selected_anchor",
     }
 
-def _pick_step4_anchor(candidate, cfg, caches):
-    states_by_assoc = caches.states_by_assoc_id(
-        candidate.video_id,
-        candidate.query_time_sec,
-    )
-
-    reject_counts = {
-        "same_as_target": 0,
-        "bad_status": 0,
-        "no_projected_pixel": 0,
-        "no_world_coordinates": 0,
-    }
-
-    visible = []
-
-    for assoc_id, st in states_by_assoc.items():
-        status = st.get("status") if isinstance(st, dict) else getattr(st, "status", None)
-        pixel = st.get("projected_pixel") if isinstance(st, dict) else getattr(st, "projected_pixel", None)
-        world = st.get("world_coordinates") if isinstance(st, dict) else getattr(st, "world_coordinates", None)
-
-        # --- filtering ---
-        if str(assoc_id) == str(candidate.assoc_id):
-            reject_counts["same_as_target"] += 1
-            continue
-
-        if status not in {"in_view", "observed_visible_in_open_fixture"}:
-            reject_counts["bad_status"] += 1
-            continue
-
-        if pixel is None:
-            reject_counts["no_projected_pixel"] += 1
-            continue
-
-        if world is None:
-            reject_counts["no_world_coordinates"] += 1
-            continue
-
-        visible.append((assoc_id, st))
-
-    # --- compact summary log ---
-    print(
-        "[ANCHOR]",
-        {
-            "t": candidate.query_time_sec,
-            "use_precomputed": caches.visibility_store.has_video(candidate.video_id),
-            "n_states": len(states_by_assoc),
-            "n_eligible": len(visible),
-        },
-    )
-
-    # --- if no anchor, print WHY ---
-    if not visible:
-        print(
-            "[NO_ANCHOR_REASON]",
-            {
-                "t": candidate.query_time_sec,
-                "reject_counts": reject_counts,
-            },
-        )
-        return None
-
-    # --- pick most central object ---
-    ctx = load_frame_context(
-        video_id=candidate.video_id,
-        time_sec=candidate.query_time_sec,
-        annotations_root=cfg.annotations_root,
-        fps=cfg.fps_for_frame_lookup,
-    )
-
-    cx = float(ctx.image_width) / 2.0
-    cy = float(ctx.image_height) / 2.0
-
-    best_assoc_id, best_state = min(
-        visible,
-        key=lambda item: (
-            float(item[1]["projected_pixel"][0]) - cx
-        ) ** 2 + (
-            float(item[1]["projected_pixel"][1]) - cy
-        ) ** 2,
-    )
-
-    print(
-        "[ANCHOR_CHOSEN]",
-        {
-            "t": candidate.query_time_sec,
-            "anchor_id": best_assoc_id,
-            "anchor_name": best_state.get("name"),
-        },
-    )
-
-    return {
-        "assoc_id": best_assoc_id,
-        "name": best_state.get("name"),
-        "projected_pixel": best_state.get("projected_pixel"),
-        "world_coordinates": best_state.get("world_coordinates"),
-    }
-
 def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]:
     if not cfg.video_ids:
         raise ValueError("No input videos were provided in the config.")
@@ -1358,7 +1289,7 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
     rng = random.Random(cfg.random_seed)
     horizon_token = _format_horizon_token(cfg.out_of_sight_horizon_sec)
     fixture_vocab = build_fixture_vocabulary(cfg.annotations_root, video_ids=cfg.video_ids)
-    candidate_pool_per_video = max(cfg.max_questions_per_video * 5, cfg.max_questions_per_video)
+    candidate_pool_per_video = cfg.max_questions_per_video
 
     visibility_store = _load_visibility_store(cfg)
     precomputed_tracks_by_video = {
@@ -1372,11 +1303,11 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
         annotations_root=cfg.annotations_root,
         horizon_sec=cfg.out_of_sight_horizon_sec,
         max_questions_per_video=candidate_pool_per_video,
+        candidate_pool_multiplier=cfg.candidate_pool_multiplier,
         sampling_fps=cfg.sampling_fps,
         fps_for_frame_lookup=cfg.fps_for_frame_lookup,
         intermediate_root=cfg.intermediate_root,
         random_seed=cfg.random_seed,
-        pre_context_sec=cfg.pre_context_sec,
         precomputed_tracks_by_video=precomputed_tracks_by_video,
     )
 
@@ -1436,10 +1367,35 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
                 if candidate_fixture is not None and _is_invalid_step4_fixture_label(candidate_fixture):
                     continue
 
-                incremental_steps.append(_build_step2_last_visible(candidate, time_tok, last_visible, cfg))
+                # incremental_steps.append(_build_step2_last_visible(candidate, time_tok, last_visible, cfg))
+                # last_placement = _find_last_placement_info(candidate, cfg, caches)
+                # if last_placement is None:
+                #     continue
+                # incremental_steps.append(_build_step3_last_placement(candidate, time_tok, last_placement, cfg))
+
                 last_placement = _find_last_placement_info(candidate, cfg, caches)
                 if last_placement is None:
                     continue
+
+                # Drop the whole trajectory if step-2 last visible time is before step-3 placement time.
+                # Logically, the object should still be visible at/after the time it stopped moving.
+                if last_visible.sampled_time_sec + 1e-9 < last_placement.sampled_time_sec:
+                    print(
+                        "[DROP_TRAJECTORY_LAST_VISIBLE_BEFORE_LAST_PLACEMENT]",
+                        {
+                            "video_id": candidate.video_id,
+                            "assoc_id": candidate.assoc_id,
+                            "object_name": candidate.object_name,
+                            "query_time_sec": candidate.query_time_sec,
+                            "last_visible_time_sec": last_visible.sampled_time_sec,
+                            "last_placement_time_sec": last_placement.sampled_time_sec,
+                            "last_visible_source": last_visible.reference_source,
+                            "last_placement_source": last_placement.reference_source,
+                        },
+                    )
+                    continue
+
+                incremental_steps.append(_build_step2_last_visible(candidate, time_tok, last_visible, cfg))
                 incremental_steps.append(_build_step3_last_placement(candidate, time_tok, last_placement, cfg))
                 incremental_steps.append(
                     _build_step4_fixture(
@@ -1497,6 +1453,7 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
                         anchor=anchor,
                         target_state_at_query=target_state_at_query,
                         cfg=cfg,
+                        rng=rng,
                     )
                 except Exception as e:
                     print(
