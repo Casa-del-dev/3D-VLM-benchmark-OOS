@@ -35,7 +35,7 @@ geometric_occlusion:
   enabled: true
   # Tolerance (metres) subtracted from camera→object distance to avoid
   # counting hits on the object's own surface as occlusion.
-  tolerance_m: 0.05
+  tolerance_m: 0.10
 
 # --- Object detection (Grounding DINO or Detic) ---------------------------------------
 # object_detection:
