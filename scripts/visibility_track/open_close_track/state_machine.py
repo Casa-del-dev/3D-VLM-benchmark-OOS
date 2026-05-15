@@ -31,6 +31,7 @@ class Interval:
     confidence: str
     source_events: List[str] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
+    backfilled: bool = False
 
 
 def _group_by_fixture(events: Iterable[ResolvedEvent]) -> Dict[tuple[str, str], list[ResolvedEvent]]:
@@ -63,6 +64,7 @@ def build_intervals(
         current_conf = rows[0].confidence
         current_sources = ["__backfill__"]
         current_notes: list[str] = [f"backfilled from first {rows[0].event.verb}"]
+        current_backfilled = True
 
         for row in rows:
             target_state = "open" if row.event.verb == "open" else "closed"
@@ -82,6 +84,7 @@ def build_intervals(
                     confidence=current_conf,
                     source_events=list(current_sources),
                     notes=list(current_notes),
+                    backfilled=current_backfilled,
                 )
             )
 
@@ -90,6 +93,7 @@ def build_intervals(
             current_conf = row.confidence
             current_sources = [row.event.unique_narration_id]
             current_notes = []
+            current_backfilled = False
 
         output.append(
             Interval(
@@ -102,6 +106,7 @@ def build_intervals(
                 confidence=current_conf,
                 source_events=list(current_sources),
                 notes=list(current_notes),
+                backfilled=current_backfilled,
             )
         )
 
