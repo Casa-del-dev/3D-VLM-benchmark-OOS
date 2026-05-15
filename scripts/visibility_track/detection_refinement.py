@@ -73,6 +73,11 @@ class RefinedInterval:
     status: str
     reason: str
     fixture: str | None = None
+    fixture_confidence: str | None = None
+    n_visible: int = 0
+    n_partial: int = 0
+    n_tested: int = 0
+    max_score: float | None = None
     detection_samples: List[dict] = field(default_factory=list)
 
 
@@ -164,10 +169,8 @@ def _build_estimator(det_cfg: DetectionConfig):
             detector_name="Detic",
             roi_scale=det_cfg.roi_scale,
             box_threshold=det_cfg.box_threshold,
-            text_threshold=det_cfg.text_threshold,
             visible_threshold=det_cfg.visible_threshold,
             partial_threshold=det_cfg.partial_threshold,
-            smoother=None,
         )
 
     raise ValueError(f"Unsupported object detection backend: {backend}")
@@ -295,6 +298,7 @@ def _passthrough(interval: CoarseInterval) -> RefinedInterval:
         status=interval.status,
         reason=interval.reason,
         fixture=interval.fixture,
+        fixture_confidence=interval.fixture_confidence,
     )
 
 
@@ -329,15 +333,24 @@ def _refine_candidate(
     ]
 
     tested = [row for row in samples if row["label"] != "skipped"]
-    positive = [row for row in tested if row["label"] in {"visible"}]
+    n_visible = sum(1 for row in tested if row["label"] == "visible")
+    n_partial = sum(1 for row in tested if row["label"] == "partially_visible")
+    n_tested = len(tested)
+    scores = [row["score"] for row in tested if row.get("score") is not None]
+    max_score = max(scores) if scores else None
 
-    if positive:
+    n_positive = n_visible + (n_partial if det_cfg.count_partial_as_positive else 0)
+    min_required = max(1, int(det_cfg.min_positive_samples))
+
+    if n_tested == 0:
+        status = OBSERVED_NOT_VISIBLE
+        reason = "no valid detection samples"
+    elif n_positive >= min_required:
         status = OBSERVED_VISIBLE
-        reason = f"detected in {len(positive)}/{len(tested)} samples"
+        reason = f"detected in {n_positive}/{n_tested} samples (min {min_required})"
     else:
         status = OBSERVED_NOT_VISIBLE
-        n = len(tested) if tested else 0
-        reason = f"not detected in {n} samples" if n else "no valid detection samples"
+        reason = f"only {n_positive}/{n_tested} positive samples (min {min_required})"
 
     return RefinedInterval(
         video_id=interval.video_id,
@@ -348,6 +361,11 @@ def _refine_candidate(
         status=status,
         reason=reason,
         fixture=interval.fixture,
+        fixture_confidence=interval.fixture_confidence,
+        n_visible=n_visible,
+        n_partial=n_partial,
+        n_tested=n_tested,
+        max_score=max_score,
         detection_samples=samples,
     )
 
@@ -416,6 +434,11 @@ def refined_to_dict(interval: RefinedInterval) -> dict:
         "status": interval.status,
         "reason": interval.reason,
         "fixture": interval.fixture,
+        "fixture_confidence": interval.fixture_confidence,
+        "n_visible": interval.n_visible,
+        "n_partial": interval.n_partial,
+        "n_tested": interval.n_tested,
+        "max_score": interval.max_score,
         "detection_samples": interval.detection_samples,
     }
 

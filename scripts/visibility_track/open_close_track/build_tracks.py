@@ -50,6 +50,7 @@ def interval_from_dict(row: dict) -> Interval:
         confidence=str(row.get("confidence", "none")),
         source_events=list(row.get("source_events", [])),
         notes=list(row.get("notes", [])),
+        backfilled=bool(row.get("backfilled", False)),
     )
 
 
@@ -122,7 +123,7 @@ def build_fixture_intervals(
                     state="closed",
                     start_time=0.0,
                     end_time=end,
-                    confidence="very_high",
+                    confidence="assumed_closed",
                     source_events=["__no_events__"],
                     notes=["no open/close events observed for this fixture"],
                 )

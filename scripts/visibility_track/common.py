@@ -20,12 +20,16 @@ class DetectionConfig:
     enabled: bool = True
     model_id: str = "IDEA-Research/grounding-dino-tiny"
     roi_scale: float = 2.0
-    box_threshold: float = 0.30
+    box_threshold: float = 0.25
     text_threshold: float = 0.25
-    visible_threshold: float = 0.62
-    partial_threshold: float = 0.28
+    visible_threshold: float = 0.5
+    partial_threshold: float = 0.3
     uncertainty_px: int = 40
     default_expected_size_px: int = 120
+
+    # Interval verdict (used by detection_refinement._refine_candidate).
+    min_positive_samples: int = 1
+    count_partial_as_positive: bool = False
 
     backend: str = "groundingdino"  # "groundingdino" or "detic"
 
@@ -128,12 +132,15 @@ def load_config(config_path: str | os.PathLike) -> PipelineConfig:
         enabled=bool(det_raw.get("enabled", True)),
         model_id=str(det_raw.get("model_id", "IDEA-Research/grounding-dino-tiny")),
         roi_scale=float(det_raw.get("roi_scale", 2.0)),
-        box_threshold=float(det_raw.get("box_threshold", 0.30)),
+        box_threshold=float(det_raw.get("box_threshold", 0.25)),
         text_threshold=float(det_raw.get("text_threshold", 0.25)),
-        visible_threshold=float(det_raw.get("visible_threshold", 0.62)),
-        partial_threshold=float(det_raw.get("partial_threshold", 0.28)),
+        visible_threshold=float(det_raw.get("visible_threshold", 0.5)),
+        partial_threshold=float(det_raw.get("partial_threshold", 0.3)),
         uncertainty_px=int(det_raw.get("uncertainty_px", 40)),
         default_expected_size_px=int(det_raw.get("default_expected_size_px", 120)),
+
+        min_positive_samples=int(det_raw.get("min_positive_samples", 1)),
+        count_partial_as_positive=bool(det_raw.get("count_partial_as_positive", False)),
 
         backend=det_raw.get("backend", "groundingdino"),
         detic_root=det_raw.get("detic_root"),
