@@ -59,9 +59,20 @@ GEOMETRICALLY_OCCLUDED = "geometrically_occluded"
 OCCLUDED_INSIDE_CLOSED_FIXTURE = "occluded_inside_closed_fixture"
 POTENTIALLY_VISIBLE_INSIDE_OPEN_FIXTURE = "potentially_visible_inside_open_fixture"
 
-# Confidence tiers at which a fixture's ``closed`` state is trusted enough to
-# hide objects inside it.  Lower confidence closures are ignored.
-CLOSED_CONFIDENCE_LEVELS: frozenset[str] = frozenset({"very_high", "high", "medium"})
+CONFIDENCE_RANK: dict[str, int] = {
+    "none": -1,
+    "very_low": 0,
+    "low": 1,
+    "medium": 2,
+    "high": 3,
+    "very_high": 4,
+    "assumed_closed": 4,
+}
+CLOSED_CONFIDENCE_MIN_RANK: int = CONFIDENCE_RANK["medium"]
+
+
+def confidence_rank(confidence: str | None) -> int:
+    return CONFIDENCE_RANK.get(confidence, -1) if confidence is not None else -1
 
 
 # --- Data --------------------------------------------------------------------
@@ -76,6 +87,7 @@ class CoarseInterval:
     status: str
     reason: str
     fixture: str | None = None
+    fixture_confidence: str | None = None
 
 
 # --- Helpers -----------------------------------------------------------------
@@ -102,48 +114,45 @@ def _fixture_interval_at(
 def classify_sample(
     sample: ObjectSample,
     fixture_intervals: list[FixtureInterval],
-) -> tuple[str, str]:
-    """Classify a single in-view sample into one of six visibility states."""
+) -> tuple[str, str, str | None]:
+    """Classify a sample into a visibility state. Third value is the
+    fixture confidence label active at this sample, or None if not in a fixture."""
 
-    # 1) Object is being manipulated — treat as in motion.
     if sample.status == "in_motion":
-        return IN_MOTION, "object in motion"
+        return IN_MOTION, "object in motion", None
 
-    # 2) No usable 3D data — conservatively treat as out of view.
     if sample.status in {"no_track_available", "no_valid_mask"}:
-        return OUT_OF_VIEW, "no stable track or mask available"
+        return OUT_OF_VIEW, "no stable track or mask available", None
 
-    # 3) Projection falls outside the camera image.
     if not sample.in_view:
-        return OUT_OF_VIEW, "projection outside image"
+        return OUT_OF_VIEW, "projection outside image", None
 
-    # 4) Determine base state: in_view or geometrically_occluded.
     if getattr(sample, "geometrically_occluded", None) is True:
         base_state = GEOMETRICALLY_OCCLUDED
     else:
         base_state = IN_VIEW
 
-    # 5) Check whether the object sits inside a fixture.
     fi = _fixture_interval_at(fixture_intervals, sample.fixture, sample.time_sec)
 
     if fi is not None:
-        if fi.state == "closed" and fi.confidence in CLOSED_CONFIDENCE_LEVELS:
+        if fi.state == "closed" and confidence_rank(fi.confidence) >= CLOSED_CONFIDENCE_MIN_RANK:
             return (
                 OCCLUDED_INSIDE_CLOSED_FIXTURE,
                 f"inside closed {fi.fixture_type} ({fi.confidence} confidence)",
+                fi.confidence,
             )
         if fi.state == "open":
             return (
                 POTENTIALLY_VISIBLE_INSIDE_OPEN_FIXTURE,
                 f"inside open {fi.fixture_type}",
+                fi.confidence,
             )
 
-    # 6) Not inside any fixture — keep base state.
     return base_state, (
         "in view, not inside a fixture"
         if base_state == IN_VIEW
         else "line of sight blocked by scene geometry"
-    )
+    ), None
 
 
 # --- Collapse consecutive same-status samples into intervals -----------------
@@ -156,17 +165,17 @@ def _collapse_track(
     if not track.samples:
         return []
 
-    labels: list[tuple[str, str, str | None]] = []
+    labels: list[tuple[str, str, str | None, str | None]] = []
     for sample in track.samples:
-        status, reason = classify_sample(sample, fixture_intervals)
-        labels.append((status, reason, sample.fixture))
+        status, reason, fixture_conf = classify_sample(sample, fixture_intervals)
+        labels.append((status, reason, sample.fixture, fixture_conf))
 
     output: list[CoarseInterval] = []
     run_start = 0
-    run_status, run_reason, run_fixture = labels[0]
+    run_status, run_reason, run_fixture, run_fixture_conf = labels[0]
 
     for i in range(1, len(labels)):
-        status, reason, fixture = labels[i]
+        status, reason, fixture, fixture_conf = labels[i]
         if status == run_status:
             continue
 
@@ -180,10 +189,11 @@ def _collapse_track(
                 status=run_status,
                 reason=run_reason,
                 fixture=run_fixture,
+                fixture_confidence=run_fixture_conf,
             )
         )
         run_start = i
-        run_status, run_reason, run_fixture = status, reason, fixture
+        run_status, run_reason, run_fixture, run_fixture_conf = status, reason, fixture, fixture_conf
 
     output.append(
         CoarseInterval(
@@ -195,6 +205,7 @@ def _collapse_track(
             status=run_status,
             reason=run_reason,
             fixture=run_fixture,
+            fixture_confidence=run_fixture_conf,
         )
     )
     return output
@@ -225,6 +236,7 @@ def coarse_to_dict(interval: CoarseInterval) -> dict:
         "status": interval.status,
         "reason": interval.reason,
         "fixture": interval.fixture,
+        "fixture_confidence": interval.fixture_confidence,
     }
 
 
@@ -238,6 +250,7 @@ def coarse_from_dict(row: dict) -> CoarseInterval:
         status=row["status"],
         reason=row["reason"],
         fixture=row.get("fixture"),
+        fixture_confidence=row.get("fixture_confidence"),
     )
 
 
