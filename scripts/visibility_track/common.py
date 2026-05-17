@@ -55,6 +55,14 @@ class PipelineConfig:
     output_root: Path
     geometric_occlusion_enabled: bool = True
     geometric_occlusion_tolerance: float = 0.05
+    # When true, cast 9 rays per sample (centroid + 4 bbox corners + 4
+    # bbox edge midpoints, back-projected through the mask frame's
+    # FISHEYE624 camera). When false (or when the 2D bbox / mask frame
+    # is missing), fall back to a single centroid ray.
+    geometric_occlusion_multi_ray: bool = True
+    # Fraction-of-blocked-rays threshold above which the sample is reported
+    # as geometrically_occluded.
+    geometric_occlusion_threshold: float = 0.5
     random_seed: int = 42
     config_path: Path | None = None
 
@@ -164,6 +172,8 @@ def load_config(config_path: str | os.PathLike) -> PipelineConfig:
         output_root=output_root,
         geometric_occlusion_enabled=bool(geo_raw.get("enabled", True)),
         geometric_occlusion_tolerance=float(geo_raw.get("tolerance_m", 0.05)),
+        geometric_occlusion_multi_ray=bool(geo_raw.get("multi_ray", True)),
+        geometric_occlusion_threshold=float(geo_raw.get("occlusion_threshold", 0.5)),
         random_seed=int(raw.get("random_seed", 42)),
         config_path=config_path,
     )

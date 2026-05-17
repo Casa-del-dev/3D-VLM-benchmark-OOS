@@ -51,6 +51,7 @@ class ObjectSample:
     world_coordinates: list[float] | None = None
     camera_coordinates: list[float] | None = None
     geometrically_occluded: bool | None = None
+    occlusion_fraction: float | None = None
 
 
 @dataclass
@@ -222,6 +223,7 @@ def track_from_dict(row: dict[str, Any]) -> ObjectInViewTrack:
             world_coordinates=sample.get("world_coordinates"),
             camera_coordinates=sample.get("camera_coordinates"),
             geometrically_occluded=sample.get("geometrically_occluded"),
+            occlusion_fraction=sample.get("occlusion_fraction"),
         )
         for sample in row.get("samples", [])
     ]

@@ -45,8 +45,10 @@ IN_SIGHT_STATUSES = {
 
 OUT_OF_SIGHT_STATUSES = {
     "out_of_view",
+    "unobservable_no_data",
     "occluded_inside_closed_fixture",
     "observed_not_visible_in_open_fixture",
+    "assumed_not_visible_in_open_fixture",
     "geometrically_occluded",
 }
 
@@ -59,6 +61,7 @@ RED_POINT_STATUSES = {
     "occluded_inside_closed_fixture",
     "geometrically_occluded",
     "observed_not_visible_in_open_fixture",
+    "assumed_not_visible_in_open_fixture",
 }
 
 
@@ -294,7 +297,7 @@ def render_overlay(
                 elif status in OUT_OF_SIGHT_STATUSES:
                     out_of_sight_entries.append((display_name, status))
 
-                if status in {"out_of_view", "in_motion"}:
+                if status in {"out_of_view", "unobservable_no_data", "in_motion"}:
                     continue
 
                 sample = next(

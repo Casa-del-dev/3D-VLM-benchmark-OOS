@@ -72,45 +72,61 @@ class RayOcclusionChecker:
         mesh = load_participant_mesh(data_root, participant_id)
         return cls(mesh)
 
+    def occlusion_fraction(
+        self,
+        camera_world: np.ndarray | list[float],
+        target_points_world: np.ndarray | list[list[float]],
+        tolerance: float = 0.05,
+    ) -> float:
+        """Fraction of rays from *camera_world* to *target_points_world*
+        that are blocked by scene geometry.
+
+        For each target point, casts a ray from the camera to that point and
+        compares the nearest hit distance against the camera→target distance
+        (minus *tolerance* to avoid self-intersection at the object surface).
+        Returns blocked-count / N. Degenerate targets (distance < 1e-6) are
+        skipped from both numerator and denominator; if every target is
+        degenerate, returns 0.0.
+        """
+        origin = np.asarray(camera_world, dtype=np.float64).reshape(3)
+        targets = np.asarray(target_points_world, dtype=np.float64).reshape(-1, 3)
+        if targets.shape[0] == 0:
+            return 0.0
+
+        directions = targets - origin
+        distances = np.linalg.norm(directions, axis=1)
+        valid = distances >= 1e-6
+        if not np.any(valid):
+            return 0.0
+
+        valid_dirs = directions[valid] / distances[valid, None]
+        valid_dists = distances[valid]
+        n_valid = int(valid_dirs.shape[0])
+        origins = np.broadcast_to(origin, valid_dirs.shape).copy()
+
+        locations, ray_indices, _ = self._intersector.intersects_location(
+            ray_origins=origins,
+            ray_directions=valid_dirs,
+            multiple_hits=False,
+        )
+
+        if len(locations) == 0:
+            return 0.0
+
+        hit_dists = np.linalg.norm(locations - origins[ray_indices], axis=1)
+        blocked = hit_dists < (valid_dists[ray_indices] - tolerance)
+        return float(blocked.sum()) / float(n_valid)
+
     def is_occluded(
         self,
         camera_world: np.ndarray | list[float],
         object_world: np.ndarray | list[float],
         tolerance: float = 0.05,
     ) -> bool:
-        """Return True when the line of sight is blocked by scene geometry.
+        """Single-ray occlusion check. Thin wrapper around occlusion_fraction.
 
-        Casts a ray from *camera_world* towards *object_world* and checks
-        whether the closest hit is nearer than the object (minus *tolerance*
-        metres to avoid self-intersection at the object surface).
-
-        Parameters
-        ----------
-        camera_world : (3,) array
-            Camera position in world coordinates.
-        object_world : (3,) array
-            Object position in world coordinates.
-        tolerance : float
-            Distance margin (metres) subtracted from the camera→object
-            distance so that hits on the object's own surface are not counted
-            as occlusion.
+        Returns True iff the line of sight from camera to *object_world* is
+        blocked by scene geometry, with *tolerance* metres subtracted from
+        the hit distance to avoid self-intersection at the object surface.
         """
-        origin = np.asarray(camera_world, dtype=np.float64).reshape(1, 3)
-        target = np.asarray(object_world, dtype=np.float64).reshape(1, 3)
-        direction = target - origin
-        dist_to_object = float(np.linalg.norm(direction))
-        if dist_to_object < 1e-6:
-            return False
-        direction = direction / dist_to_object
-
-        locations, ray_indices, _ = self._intersector.intersects_location(
-            ray_origins=origin,
-            ray_directions=direction,
-            multiple_hits=False,
-        )
-
-        if len(locations) == 0:
-            return False
-
-        hit_dist = float(np.linalg.norm(locations[0] - origin[0]))
-        return hit_dist < (dist_to_object - tolerance)
+        return self.occlusion_fraction(camera_world, [object_world], tolerance) >= 0.5

@@ -64,8 +64,10 @@ _STATUS_META: Dict[str, Tuple[str, str]] = {
     "geometrically_occluded":                   ("#8b6f47", "Occluded by geometry"),
     "occluded_inside_closed_fixture":           ("#6b5b95", "Occluded in closed fixture"),
     "observed_not_visible_in_open_fixture":     ("#7d8590", "Not visible in open fixture"),
+    "assumed_not_visible_in_open_fixture":      ("#5b6068", "Assumed not visible (open fixture)"),
     # neutral ground state ---------------------------------------------------
     "out_of_view":                              ("#4b5563", "Out of view"),
+    "unobservable_no_data":                     ("#374151", "Unobservable (no data)"),
 }
 
 _STATUS_ORDER = [
@@ -76,7 +78,9 @@ _STATUS_ORDER = [
     "geometrically_occluded",
     "occluded_inside_closed_fixture",
     "observed_not_visible_in_open_fixture",
+    "assumed_not_visible_in_open_fixture",
     "out_of_view",
+    "unobservable_no_data",
 ]
 
 # Statuses that count as "confirmed visible" for the % annotation and density strip.

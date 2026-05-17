@@ -5,13 +5,13 @@
 
 # --- Dataset paths -----------------------------------------------------------
 #Ivo's local paths below:
-# annotations_root: ../../../hd-epic-annotations
-# data_root: ../../../data
-# intermediate_data_root: ../../../hd-epic-annotations/Intermediate_data
+annotations_root: ../../../hd-epic-annotations
+data_root: ../../../data
+intermediate_data_root: ../../../hd-epic-annotations/Intermediate_data
 
-annotations_root: ../../hd-epic-annotations
-data_root: ../../data
-intermediate_data_root: ../../hd-epic-annotations/Intermediate_data
+# annotations_root: ../../hd-epic-annotations
+# data_root: ../../data
+# intermediate_data_root: ../../hd-epic-annotations/Intermediate_data
 
 
 # --- What to process ---------------------------------------------------------
@@ -36,6 +36,13 @@ geometric_occlusion:
   # Tolerance (metres) subtracted from camera→object distance to avoid
   # counting hits on the object's own surface as occlusion.
   tolerance_m: 0.10
+  # If true, cast 9 rays per sample (centroid + 4 bbox corners + 4 bbox
+  # edge midpoints, back-projected through the mask reference frame's
+  # FISHEYE624 camera). If false (or when the 2D bbox / mask frame is
+  # unavailable), fall back to a single centroid ray.
+  multi_ray: true
+  # Fraction-of-blocked-rays threshold to mark a sample as occluded.
+  occlusion_threshold: 0.5
 
 # --- Object detection (Grounding DINO or Detic) ---------------------------------------
 # object_detection:
@@ -53,8 +60,8 @@ geometric_occlusion:
 object_detection:
   backend: detic
 
-  detic_root: /Users/fangzhouma/Desktop/3d_vision/FIction-Detic
-  # detic_root: /Users/ivo/Documents/ETHZ/3DVision/Detic
+  # detic_root: /Users/fangzhouma/Desktop/3d_vision/FIction-Detic
+  detic_root: /Users/ivo/Documents/ETHZ/3DVision/Detic
 
   # choose one model
   config_file: configs/Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.yaml

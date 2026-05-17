@@ -4,6 +4,29 @@ Produces per-object visibility intervals for HD-EPIC videos: for every
 object in `assoc_info.json`, when is it actually visible to the head-mounted
 camera? The output drives out-of-sight (OOS) VQA generation downstream.
 
+## Status precedence
+
+Final visibility-track output assigns each sample the **first** status
+that matches. Stages 2–4 cooperate to produce this single label per
+sample (see `combine.py` and `detection_refinement.py` for the
+implementations).
+
+| Rank | Status | Set in stage | Condition |
+|------|--------|--------------|-----------|
+| 1 | `in_motion` | 1 | person is manipulating the object |
+| 2 | `unobservable_no_data` | 1 → 3 | no stable track or no valid mask available |
+| 3 | `out_of_view` | 1 → 3 | projection outside image / behind camera / on fisheye black border |
+| 4 | `occluded_inside_closed_fixture` | 3 | inside a fixture marked closed with `confidence >= medium` |
+| 5a | `observed_visible_in_open_fixture` | 4 | open fixture, detector ran, positives ≥ `min_positive_samples` |
+| 5b | `observed_not_visible_in_open_fixture` | 4 | open fixture, detector ran, positives < `min_positive_samples` |
+| 5c | `assumed_not_visible_in_open_fixture` | 4 | open fixture, detector never ran (`n_tested == 0`) |
+| 6 | `geometrically_occluded` | 2 | ray-cast blocked, **not** inside any fixture |
+| 7 | `in_view` | 1, 3 | default — visible to the camera, no overriding refinement |
+
+Geometric occlusion is intentionally discarded when a sample sits inside
+an open fixture — stage 4 takes over with the detector. Inside a closed
+fixture, geometric occlusion is redundant and ignored.
+
 ## Pipeline (4 stages)
 
 ### Stage 1 -- In-view track (`in_view_track/in_view_track_generator.py`)
@@ -65,6 +88,7 @@ currently marked `in_view` or `geometrically_occluded`:
 |-----------------------------------------|------------------------------------------------|
 | `in_view`                               | In view, not inside any fixture                 |
 | `out_of_view`                           | (passthrough)                                   |
+| `unobservable_no_data`                  | (passthrough)                                   |
 | `in_motion`                             | (passthrough)                                   |
 | `geometrically_occluded`                | Occluded by geometry, not inside any fixture    |
 | `occluded_inside_closed_fixture`        | Inside a closed fixture                         |
@@ -102,11 +126,13 @@ all rate-limited by `object_detection_sampling_fps`.
 |---------------------------------------|-----------------------------------------|
 | `in_view`                             | (passthrough)                            |
 | `out_of_view`                         | (passthrough)                            |
+| `unobservable_no_data`                | (passthrough)                            |
 | `in_motion`                           | (passthrough)                            |
 | `geometrically_occluded`              | (passthrough)                            |
 | `occluded_inside_closed_fixture`      | (passthrough)                            |
-| `observed_visible_in_open_fixture`    | Detected by the configured backend       |
-| `observed_not_visible_in_open_fixture`| Not detected by the configured backend   |
+| `observed_visible_in_open_fixture`    | Detected in >= `min_positive_samples` frames |
+| `observed_not_visible_in_open_fixture`| Detection ran but did not reach `min_positive_samples` |
+| `assumed_not_visible_in_open_fixture` | Detection never ran (`n_tested == 0`, e.g. frame read failures) |
 
 Output: `visibility_track.jsonl` + `visibility_track_summary.json`
 

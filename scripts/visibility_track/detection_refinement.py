@@ -4,21 +4,25 @@ with ROI object detection.
 For every coarse interval that stage 3 labelled
 ``potentially_visible_inside_open_fixture``, this samples a handful of frames
 (dense at short intervals, quartile-spaced at long ones), projects the object
-into each frame, runs Grounding DINO inside a tight ROI around that
+into each frame, runs the configured detector inside a tight ROI around that
 projection, and upgrades the interval to:
 
-  * ``observed_visible_in_open_fixture``     -- detected in at least one sample
-  * ``observed_not_visible_in_open_fixture`` -- never detected across all samples
+  * ``observed_visible_in_open_fixture``     -- detected in >= min_required samples
+  * ``observed_not_visible_in_open_fixture`` -- detection ran, fewer positives than required
+  * ``assumed_not_visible_in_open_fixture``  -- detection never ran (n_tested == 0)
 
-All other statuses from stage 3 (in_view, out_of_view, in_motion,
-geometrically_occluded, occluded_inside_closed_fixture) pass through
-unchanged.
+All other statuses from stage 3 (in_view, out_of_view, unobservable_no_data,
+in_motion, geometrically_occluded, occluded_inside_closed_fixture) pass
+through unchanged.
 
 Output statuses
 ---------------
-  in_view, out_of_view, in_motion, geometrically_occluded,
-  occluded_inside_closed_fixture, observed_visible_in_open_fixture,
-  observed_not_visible_in_open_fixture
+  in_view, out_of_view, unobservable_no_data, in_motion,
+  geometrically_occluded, occluded_inside_closed_fixture,
+  observed_visible_in_open_fixture, observed_not_visible_in_open_fixture,
+  assumed_not_visible_in_open_fixture
+
+See ``combine.py`` for the full status precedence table.
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ if __package__ in (None, ""):
     from scripts.visibility_track.combine import (  # noqa: E402
         CoarseInterval,
         POTENTIALLY_VISIBLE_INSIDE_OPEN_FIXTURE,
+        STAGE3_STATUSES,
         coarse_from_dict,
     )
     from scripts.visibility_track.common import (  # noqa: E402
@@ -48,7 +53,12 @@ if __package__ in (None, ""):
     )
     from scripts.visibility_track.in_view_track.in_view_determination import VideoCache, determine_in_view_objects  # noqa: E402
 else:
-    from .combine import CoarseInterval, POTENTIALLY_VISIBLE_INSIDE_OPEN_FIXTURE, coarse_from_dict
+    from .combine import (
+        CoarseInterval,
+        POTENTIALLY_VISIBLE_INSIDE_OPEN_FIXTURE,
+        STAGE3_STATUSES,
+        coarse_from_dict,
+    )
     from .common import DetectionConfig, PipelineConfig, load_config, read_jsonl, write_jsonl
     from .in_view_track.in_view_determination import VideoCache, determine_in_view_objects
 
@@ -59,6 +69,15 @@ DEFAULT_CONFIG = Path(__file__).resolve().parent / "visibility_track_config.yaml
 
 OBSERVED_VISIBLE = "observed_visible_in_open_fixture"
 OBSERVED_NOT_VISIBLE = "observed_not_visible_in_open_fixture"
+ASSUMED_NOT_VISIBLE = "assumed_not_visible_in_open_fixture"
+
+# Final visibility-track statuses (stage 4 output). Stage 4 only changes
+# POTENTIALLY_VISIBLE_INSIDE_OPEN_FIXTURE into one of the three observed/
+# assumed variants below; everything else passes through.
+STAGE4_STATUSES: frozenset[str] = (
+    (STAGE3_STATUSES - {POTENTIALLY_VISIBLE_INSIDE_OPEN_FIXTURE})
+    | {OBSERVED_VISIBLE, OBSERVED_NOT_VISIBLE, ASSUMED_NOT_VISIBLE}
+)
 
 
 # --- Data --------------------------------------------------------------------
@@ -343,7 +362,7 @@ def _refine_candidate(
     min_required = max(1, int(det_cfg.min_positive_samples))
 
     if n_tested == 0:
-        status = OBSERVED_NOT_VISIBLE
+        status = ASSUMED_NOT_VISIBLE
         reason = "no valid detection samples"
     elif n_positive >= min_required:
         status = OBSERVED_VISIBLE
@@ -419,7 +438,36 @@ def refine_with_detection(
                 pbar.update(len(_detection_times(interval.start_sec, interval.end_sec, det_sampling_fps)))
 
     output.sort(key=lambda row: (row.assoc_id, row.start_sec))
+    _assert_refined_invariants(output)
     return output
+
+
+def _assert_refined_invariants(intervals: list[RefinedInterval]) -> None:
+    by_assoc: dict[str, list[RefinedInterval]] = {}
+    for iv in intervals:
+        if iv.status not in STAGE4_STATUSES:
+            raise AssertionError(
+                f"stage 4 emitted unknown status {iv.status!r} for assoc_id={iv.assoc_id}"
+            )
+        if iv.end_sec < iv.start_sec:
+            raise AssertionError(
+                f"stage 4 interval end_sec<start_sec for assoc_id={iv.assoc_id} "
+                f"({iv.start_sec}..{iv.end_sec})"
+            )
+        if iv.n_tested < 0 or iv.n_visible < 0 or iv.n_partial < 0:
+            raise AssertionError(
+                f"stage 4 negative sample counts for assoc_id={iv.assoc_id}: "
+                f"n_tested={iv.n_tested}, n_visible={iv.n_visible}, n_partial={iv.n_partial}"
+            )
+        by_assoc.setdefault(iv.assoc_id, []).append(iv)
+
+    for assoc_id, rows in by_assoc.items():
+        for prev, curr in zip(rows, rows[1:]):
+            if curr.start_sec < prev.end_sec:
+                raise AssertionError(
+                    f"stage 4 overlapping intervals for assoc_id={assoc_id}: "
+                    f"[{prev.start_sec}..{prev.end_sec}] then [{curr.start_sec}..{curr.end_sec}]"
+                )
 
 
 # --- Serialisation -----------------------------------------------------------

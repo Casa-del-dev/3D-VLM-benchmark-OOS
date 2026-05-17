@@ -12,12 +12,30 @@ refines the status of samples that are currently ``in_view`` or
   * Otherwise the sample keeps its current state (``in_view`` or
     ``geometrically_occluded``).
 
-States ``out_of_view`` and ``in_motion`` pass through unchanged.
+States ``in_motion``, ``unobservable_no_data``, and ``out_of_view`` pass
+through unchanged.
 
-Output statuses
----------------
-  in_view, out_of_view, in_motion, geometrically_occluded,
-  occluded_inside_closed_fixture, potentially_visible_inside_open_fixture
+Status precedence (the single status emitted for a sample is the FIRST
+match in this ordered list — stages 2, 3, and 4 cooperate to produce it):
+
+  1. in_motion                              (stage 1; person manipulating)
+  2. unobservable_no_data                   (stage 1; no_track or no_valid_mask)
+  3. out_of_view                            (stage 1; projection outside image,
+                                             behind camera, or fisheye black border)
+  4. occluded_inside_closed_fixture         (stage 3; inside closed fixture,
+                                             confidence >= medium)
+  5a. observed_visible_in_open_fixture       (stage 4; open fixture, detector
+                                              ran with positives >= min_required)
+  5b. observed_not_visible_in_open_fixture   (stage 4; open fixture, detector
+                                              ran without enough positives)
+  5c. assumed_not_visible_in_open_fixture    (stage 4; open fixture, detector
+                                              never ran -- n_tested == 0)
+  6. geometrically_occluded                 (stage 2; ray blocked, not inside
+                                             any fixture)
+  7. in_view                                (default; passes through)
+
+Note: geometric occlusion is intentionally *discarded* when a sample sits
+inside an open fixture — stage 4 takes over with detection.
 """
 
 from __future__ import annotations
@@ -54,11 +72,28 @@ DEFAULT_CONFIG = Path(__file__).resolve().parent / "visibility_track_config.yaml
 
 IN_VIEW = "in_view"
 OUT_OF_VIEW = "out_of_view"
+UNOBSERVABLE_NO_DATA = "unobservable_no_data"
 IN_MOTION = "in_motion"
 GEOMETRICALLY_OCCLUDED = "geometrically_occluded"
 OCCLUDED_INSIDE_CLOSED_FIXTURE = "occluded_inside_closed_fixture"
 POTENTIALLY_VISIBLE_INSIDE_OPEN_FIXTURE = "potentially_visible_inside_open_fixture"
 
+# Statuses that stage 3 may emit. Stage 4 may upgrade
+# POTENTIALLY_VISIBLE_INSIDE_OPEN_FIXTURE to one of three observed/assumed
+# variants (see detection_refinement.py).
+STAGE3_STATUSES: frozenset[str] = frozenset({
+    IN_MOTION,
+    UNOBSERVABLE_NO_DATA,
+    OUT_OF_VIEW,
+    OCCLUDED_INSIDE_CLOSED_FIXTURE,
+    POTENTIALLY_VISIBLE_INSIDE_OPEN_FIXTURE,
+    GEOMETRICALLY_OCCLUDED,
+    IN_VIEW,
+})
+
+# Fixture confidence tiers. "assumed_closed" intentionally shares rank 4
+# with "very_high": a fixture with zero open/close events is treated as
+# confidently closed by default (see build_tracks.py zero-events placeholder).
 CONFIDENCE_RANK: dict[str, int] = {
     "none": -1,
     "very_low": 0,
@@ -122,7 +157,7 @@ def classify_sample(
         return IN_MOTION, "object in motion", None
 
     if sample.status in {"no_track_available", "no_valid_mask"}:
-        return OUT_OF_VIEW, "no stable track or mask available", None
+        return UNOBSERVABLE_NO_DATA, "no stable track or mask available", None
 
     if not sample.in_view:
         return OUT_OF_VIEW, "projection outside image", None
@@ -221,7 +256,31 @@ def combine_tracks(
     for track in in_view_tracks.values():
         output.extend(_collapse_track(video_id, track, fixture_rows))
     output.sort(key=lambda row: (row.assoc_id, row.start_sec))
+    _assert_coarse_invariants(output)
     return output
+
+
+def _assert_coarse_invariants(intervals: list[CoarseInterval]) -> None:
+    by_assoc: dict[str, list[CoarseInterval]] = {}
+    for iv in intervals:
+        if iv.status not in STAGE3_STATUSES:
+            raise AssertionError(
+                f"stage 3 emitted unknown status {iv.status!r} for assoc_id={iv.assoc_id}"
+            )
+        if iv.end_sec < iv.start_sec:
+            raise AssertionError(
+                f"stage 3 interval end_sec<start_sec for assoc_id={iv.assoc_id} "
+                f"({iv.start_sec}..{iv.end_sec})"
+            )
+        by_assoc.setdefault(iv.assoc_id, []).append(iv)
+
+    for assoc_id, rows in by_assoc.items():
+        for prev, curr in zip(rows, rows[1:]):
+            if curr.start_sec < prev.end_sec:
+                raise AssertionError(
+                    f"stage 3 overlapping intervals for assoc_id={assoc_id}: "
+                    f"[{prev.start_sec}..{prev.end_sec}] then [{curr.start_sec}..{curr.end_sec}]"
+                )
 
 
 # --- Serialisation -----------------------------------------------------------
