@@ -3,15 +3,15 @@ import cv2
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 
-input_dir = Path("/Users/fangzhouma/Desktop/3d_vision/3D-VLM-benchmark-OOS/data/HD-EPIC/Videos/P01_raw")
-output_dir = Path("/Users/fangzhouma/Desktop/3d_vision/3D-VLM-benchmark-OOS/data/HD-EPIC/Videos/P01_preprocessed_with_watermark")
+input_dir = Path("/Users/fangzhouma/Desktop/3d_vision/3D-VLM-benchmark-OOS/data/HD-EPIC/Videos/P04_raw")
+output_dir = Path("/Users/fangzhouma/Desktop/3d_vision/3D-VLM-benchmark-OOS/data/HD-EPIC/Videos/P04_preprocessed_with_watermark")
 output_dir.mkdir(parents=True, exist_ok=True)
 
 add_watermark = True
 watermark_style = "plain"  # plain, labeled, token
 
 target_fps = 1
-target_size = (168, 168)
+target_size = (448, 448)
 
 def format_time(seconds: float) -> str:
     h = int(seconds // 3600)

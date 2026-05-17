@@ -112,6 +112,58 @@ class VisibilityTrackStore:
     def get_track_dict(self, video_id: str) -> dict[str, Any]:
         video = self.raw_by_video.get(video_id, {})
         return video.get("object_tracks", {})
+    
+    def get_stable_visible_infos_around_time(
+        self,
+        video_id: str,
+        assoc_id: str,
+        center_time_sec: float,
+        clip_start_time_sec: float,
+        clip_end_time_sec: float,
+        before_sec: int = 3,
+        after_sec: int = 3,
+    ) -> list[LastVisibleInfo]:
+        """
+        Return stable-visible samples around center_time_sec from merged visibility tracks.
+
+        Since merged visibility tracks are sampled at 1 FPS, this tries integer-second
+        offsets around the ground-truth time. If exact +/-3 sec is unavailable, it
+        returns the available stable-visible samples in the requested window.
+        """
+        track = self.get_track_dict(video_id).get(assoc_id)
+        if track is None:
+            return []
+
+        times = [float(t) for t in track.get("sampled_times_sec", [])]
+        stable = track.get("stable_visibility_samples", [])
+        if not times or not stable:
+            return []
+
+        start_t = max(float(clip_start_time_sec), float(center_time_sec) - float(before_sec))
+        end_t = min(float(clip_end_time_sec), float(center_time_sec) + float(after_sec))
+
+        infos: list[LastVisibleInfo] = []
+
+        for idx, t in enumerate(times):
+            if t < start_t - 1e-9 or t > end_t + 1e-9:
+                continue
+            if not bool(self._list_value(stable, idx)):
+                continue
+
+            infos.append(
+                LastVisibleInfo(
+                    sampled_time_sec=float(t),
+                    projected_pixel=self._list_value(track.get("projected_pixel_samples", []), idx),
+                    camera_coordinates=self._list_value(track.get("camera_coordinate_samples", []), idx),
+                    frame_index=self._list_value(track.get("frame_index_samples", []), idx),
+                    status=str(self._list_value(track.get("status_samples", []), idx) or "ok"),
+                    fixture=self._list_value(track.get("fixture_samples", []), idx),
+                    world_coordinates=self._list_value(track.get("world_coordinate_samples", []), idx),
+                    reference_source="step2_acceptable_answers_from_merged_visibility_track",
+                )
+            )
+
+        return infos
 
     @staticmethod
     def _times_index(times: list[Any], time_sec: float) -> int | None:
@@ -404,6 +456,9 @@ def _format_time_hms_1dp(time_sec: float) -> str:
     seconds = t - (hours * 3600 + minutes * 60)
     return f"{hours:02d}:{minutes:02d}:{seconds:04.1f}"
 
+def _format_float(value: float, ndigits: int = 4) -> str:
+    text = f"{float(value):.{ndigits}f}"
+    return text.rstrip("0").rstrip(".") if "." in text else text
 
 def _time_token(time_sec: float, input_key: str = "video 1") -> str:
     return f"<TIME {_format_time_hms_1dp(time_sec)} {input_key}>"
@@ -569,6 +624,68 @@ def _find_last_placement_info_raw(
         reference_source="raw_assoc_info_mask_info_latest_mask_of_last_past_track",
     )
 
+def _build_step3_future_acceptable_infos(
+    candidate: KeyFrameCandidate,
+    last_placement: LastVisibleInfo,
+    cfg: BenchmarkConfig,
+    caches: RuntimeCaches,
+    num_after: int = 3,
+) -> list[LastVisibleInfo]:
+    """
+    For step 3, add acceptable answers at the next integer seconds after the
+    decimal raw-track placement time.
+
+    Example: gt=12.2 -> 13, 14, 15.
+    """
+    if last_placement.world_coordinates is None:
+        return []
+
+    gt_time = float(last_placement.sampled_time_sec)
+    first_t = math.floor(gt_time) + 1
+
+    infos: list[LastVisibleInfo] = []
+
+    for t_int in range(first_t, first_t + num_after):
+        t = float(t_int)
+
+        # Do not add times after the query/clip end.
+        if t > float(candidate.query_time_sec) + 1e-9:
+            break
+        if t > float(candidate.clip_end_time_sec) + 1e-9:
+            break
+
+        projected_pixel, camera_coordinates, frame_index = _project_world_point_at_time(
+            video_id=candidate.video_id,
+            time_sec=t,
+            world_coordinates=last_placement.world_coordinates,
+            cfg=cfg,
+            caches=caches,
+        )
+
+        normalized_projected_pixel = _normalize_projected_pixel(
+            projected_pixel,
+            cfg.raw_video_width,
+            cfg.raw_video_height,
+        )
+
+        if normalized_projected_pixel is None:
+            continue
+
+        infos.append(
+            LastVisibleInfo(
+                sampled_time_sec=t,
+                projected_pixel=projected_pixel,
+                camera_coordinates=camera_coordinates,
+                frame_index=frame_index,
+                status="step3_future_projection_from_raw_placement_world_point",
+                fixture=last_placement.fixture,
+                world_coordinates=last_placement.world_coordinates,
+                reference_source="step3_acceptable_answers_projected_after_raw_track_end",
+            )
+        )
+
+    return infos
+
 def _find_last_placement_info(
     candidate: KeyFrameCandidate,
     cfg: BenchmarkConfig,
@@ -726,6 +843,29 @@ def _normalize_projected_pixel(
         float(projected_pixel[1]) / float(raw_video_height),
     ]
 
+def _format_time_point_answer(
+    time_sec: float,
+    normalized_projected_pixel: list[float] | None,
+) -> str | None:
+    if normalized_projected_pixel is None or len(normalized_projected_pixel) < 2:
+        return None
+
+    return (
+        f"{_time_token(float(time_sec), input_key='video 1')}; "
+        f"Point=({_format_float(float(normalized_projected_pixel[0]), 4)}, "
+        f"{_format_float(float(normalized_projected_pixel[1]), 4)})"
+    )
+
+
+def _dedup_answers(answers: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for a in answers:
+        key = str(a).strip()
+        if key and key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
 
 def _build_common_fields(candidate: KeyFrameCandidate) -> dict[str, Any]:
     query_time_in_clip_sec = candidate.query_time_sec - candidate.clip_start_time_sec
@@ -796,6 +936,7 @@ def _build_step2_last_visible(
     time_tok: str,
     last_visible: LastVisibleInfo,
     cfg: BenchmarkConfig,
+    caches: RuntimeCaches,
 ) -> dict[str, Any]:
     normalized_projected_pixel = _normalize_projected_pixel(
         last_visible.projected_pixel,
@@ -803,6 +944,54 @@ def _build_step2_last_visible(
         cfg.raw_video_height,
     )
     last_visible_time_token = _time_token(last_visible.sampled_time_sec, input_key="video 1")
+
+    acceptable_infos: list[LastVisibleInfo] = []
+
+    if caches.visibility_store.has_video(candidate.video_id):
+        acceptable_infos = caches.visibility_store.get_stable_visible_infos_around_time(
+            video_id=candidate.video_id,
+            assoc_id=candidate.assoc_id,
+            center_time_sec=last_visible.sampled_time_sec,
+            clip_start_time_sec=candidate.clip_start_time_sec,
+            clip_end_time_sec=candidate.clip_end_time_sec,
+            before_sec=3,
+            after_sec=3,
+        )
+
+    # Always include the original gold answer.
+    if not acceptable_infos:
+        acceptable_infos = [last_visible]
+
+    acceptable_answers: list[str] = []
+    acceptable_answer_metadata: list[dict[str, Any]] = []
+
+    for info in acceptable_infos:
+        norm_xy = _normalize_projected_pixel(
+            info.projected_pixel,
+            cfg.raw_video_width,
+            cfg.raw_video_height,
+        )
+        ans = _format_time_point_answer(info.sampled_time_sec, norm_xy)
+        if ans is None:
+            continue
+
+        acceptable_answers.append(ans)
+        acceptable_answer_metadata.append(
+            {
+                "time_sec": info.sampled_time_sec,
+                "time_token": _time_token(info.sampled_time_sec, input_key="video 1"),
+                "projected_pixel": info.projected_pixel,
+                "normalized_projected_pixel": norm_xy,
+                "camera_coordinates": info.camera_coordinates,
+                "frame_index": info.frame_index,
+                "status": info.status,
+                "fixture": info.fixture,
+                "world_coordinates": info.world_coordinates,
+                "reference_source": info.reference_source,
+            }
+        )
+
+    acceptable_answers = _dedup_answers(acceptable_answers)
 
     return {
         "step": 2,
@@ -813,7 +1002,8 @@ def _build_step2_last_visible(
             f"When was it last visible, and where was it located in the image at that moment?"
         ),
         "choices": [],
-        "correct_idx": None,
+        #"correct_idx": None,
+        "acceptable_answers": acceptable_answers,
         "answer_metadata": {
             "sampled_last_visible_time_sec": last_visible.sampled_time_sec,
             "sampled_last_visible_time_in_clip_sec": last_visible.sampled_time_sec - candidate.clip_start_time_sec,
@@ -823,8 +1013,9 @@ def _build_step2_last_visible(
             "camera_coordinates": last_visible.camera_coordinates,
             "frame_index": last_visible.frame_index,
             "status": last_visible.status,
-            "fixture": last_visible.fixture,
+            "fixture": last_visible.fixture,           
             "world_coordinates": last_visible.world_coordinates,
+            "acceptable_answer_metadata": acceptable_answer_metadata, 
             "reference_source": last_visible.reference_source,
             "note": (
                 "Uses the precomputed visibility track when available and otherwise falls back to "
@@ -839,6 +1030,7 @@ def _build_step3_last_placement(
     time_tok: str,
     last_placement: LastVisibleInfo,
     cfg: BenchmarkConfig,
+    caches: RuntimeCaches,
 ) -> dict[str, Any]:
     normalized_projected_pixel = _normalize_projected_pixel(
         last_placement.projected_pixel,
@@ -846,6 +1038,50 @@ def _build_step3_last_placement(
         cfg.raw_video_height,
     )
     last_placement_time_token = _time_token(last_placement.sampled_time_sec, input_key="video 1")
+
+    acceptable_infos = [last_placement]
+
+    if str(cfg.last_placement_source).strip().lower() == "raw_tracks":
+        acceptable_infos.extend(
+            _build_step3_future_acceptable_infos(
+                candidate=candidate,
+                last_placement=last_placement,
+                cfg=cfg,
+                caches=caches,
+                num_after=3,
+            )
+        )
+
+    acceptable_answers: list[str] = []
+    acceptable_answer_metadata: list[dict[str, Any]] = []
+
+    for info in acceptable_infos:
+        norm_xy = _normalize_projected_pixel(
+            info.projected_pixel,
+            cfg.raw_video_width,
+            cfg.raw_video_height,
+        )
+        ans = _format_time_point_answer(info.sampled_time_sec, norm_xy)
+        if ans is None:
+            continue
+
+        acceptable_answers.append(ans)
+        acceptable_answer_metadata.append(
+            {
+                "time_sec": info.sampled_time_sec,
+                "time_token": _time_token(info.sampled_time_sec, input_key="video 1"),
+                "projected_pixel": info.projected_pixel,
+                "normalized_projected_pixel": norm_xy,
+                "camera_coordinates": info.camera_coordinates,
+                "frame_index": info.frame_index,
+                "status": info.status,
+                "fixture": info.fixture,
+                "world_coordinates": info.world_coordinates,
+                "reference_source": info.reference_source,
+            }
+        )
+
+    acceptable_answers = _dedup_answers(acceptable_answers)
 
     return {
         "step": "3",
@@ -856,7 +1092,8 @@ def _build_step3_last_placement(
             f"At what time did it stop moving? Where was it located in the image at that moment?"
         ),
         "choices": [],
-        "correct_idx": None,
+        #"correct_idx": None,
+        "acceptable_answers": acceptable_answers,        
         "answer_metadata": {
             "last_placement_time_sec": last_placement.sampled_time_sec,
             "last_placement_time_in_clip_sec": last_placement.sampled_time_sec - candidate.clip_start_time_sec,
@@ -868,6 +1105,7 @@ def _build_step3_last_placement(
             "status": last_placement.status,
             "fixture": last_placement.fixture,
             "world_coordinates": last_placement.world_coordinates,
+            "acceptable_answer_metadata": acceptable_answer_metadata,
             "reference_source": last_placement.reference_source,
             "note": (
                 "Uses exact past-track end position when last_placement_source=raw_tracks, "
@@ -1656,8 +1894,8 @@ def generate_staged_benchmark(cfg: BenchmarkConfig) -> dict[str, dict[str, Any]]
                     )
                     continue
 
-                incremental_steps.append(_build_step2_last_visible(candidate, time_tok, last_visible, cfg))
-                incremental_steps.append(_build_step3_last_placement(candidate, time_tok, last_placement, cfg))
+                incremental_steps.append(_build_step2_last_visible(candidate, time_tok, last_visible, cfg, caches))
+                incremental_steps.append(_build_step3_last_placement(candidate, time_tok, last_placement, cfg, caches))
                 step4 = _build_step4_fixture(
                         candidate,
                         time_tok,

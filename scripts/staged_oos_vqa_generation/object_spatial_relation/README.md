@@ -200,10 +200,10 @@ far : > 2m
 
 ```bash
 python scripts/staged_oos_vqa_generation/object_spatial_relation/visualize_staged_oos_vqa.py \
-  --questions scripts/staged_oos_vqa_generation/object_spatial_relation/outputs/generated_vqa/P01-20240203-132119_vqa_5_30_5d.json \
+  --questions scripts/staged_oos_vqa_generation/object_spatial_relation/outputs/generated_vqa/P04-20240413-142619_vqa_5_300.json \
   --video data/HD-EPIC/Videos/P04/P04-20240413-142619.mp4 \
-  --output_dir scripts/staged_oos_vqa_generation/object_spatial_relation/outputs/visualizations/P01/P01-20240203-132119/horizon5_5d \
-  --num_samples 30
+  --output_dir scripts/staged_oos_vqa_generation/object_spatial_relation/outputs/visualizations/P04/P04-20240413-142619/horizon5 \
+  --num_samples 100
 ```
 ---
 

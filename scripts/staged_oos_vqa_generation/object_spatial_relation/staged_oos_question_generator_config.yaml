@@ -5,7 +5,7 @@ kitchen_region_map_json: configs/kitchen_region_maps.json
 
 inputs:
   videos:
-    - P01-20240203-132119
+    - P04-20240413-142619
 
 # Sampling
 sampling_fps: 1.0
@@ -13,7 +13,7 @@ fps_for_frame_lookup: 30.0
 
 # Out-of-sight definition
 out_of_sight_horizon_sec: 5.0
-max_questions_per_video: 30
+max_questions_per_video: 2
 
 object_detection_filter:
   enabled: true
@@ -63,8 +63,8 @@ relative:
 random_seed: 42
 
 # Output
-output_json: outputs/generated_vqa/P01-20240203-132119_vqa_5_30_5d.json
+output_json: outputs/generated_vqa/P04-20240413-142619_vqa_5_2_step23adapted.json
 
 #in_view track
 visibility_tracks_json:
-  P01-20240203-132119: outputs/merged_tracks/P01/P01-20240203-132119_merged_visibility_track.json
+  P04-20240413-142619: outputs/merged_tracks/P04/P04-20240413-142619_merged_visibility_track.json

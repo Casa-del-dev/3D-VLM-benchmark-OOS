@@ -499,7 +499,7 @@ if __name__ == "__main__":
 
 # python scripts/preprocessing/preprocess_oos_for_lmms_eval_v2.py \
 #     --input \
-#         /Users/fangzhouma/Desktop/3d_vision/3D-VLM-benchmark-OOS/scripts/staged_oos_vqa_generation/object_spatial_relation/outputs/generated_vqa/P01-20240203-132119_vqa_5_30_5d.json \
+#         /Users/fangzhouma/Desktop/3d_vision/3D-VLM-benchmark-OOS/scripts/staged_oos_vqa_generation/object_spatial_relation/outputs/generated_vqa/P04-20240413-142619_vqa_5_2_step23adapted.json \
 #     --output-dir outputs/jsonl_v2 \
-#     --video-root /work/courses/3dv/team1/data/HD-EPIC/Videos/P01_preprocessed_with_watermark \
+#     --video-root /work/courses/3dv/team1/data/HD-EPIC/Videos/P04_preprocessed_with_watermark \
 #     --include-gold-history

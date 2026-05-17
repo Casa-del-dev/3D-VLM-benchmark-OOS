@@ -16,8 +16,8 @@ intermediate_data_root: ../../hd-epic-annotations/Intermediate_data
 
 # --- What to process ---------------------------------------------------------
 inputs:
-  participants: [P01]
-  videos: [P01-20240203-184045]
+  participants: [P04]
+  videos: [P04-20240413-142619]
 
 # --- Sampling rates ----------------------------------------------------------
 # How densely we evaluate "is the object in view?" (3D projection, very cheap).
